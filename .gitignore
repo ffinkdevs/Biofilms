@@ -397,3 +397,22 @@ geolocator/data/market_bars.sqlite
 # Large binary reference data gets an explicit distribution decision, not a
 # silent commit.
 geolocator/cache/
+
+# Odin port build outputs (odin/build.sh OUTDIR).
+odin/build/
+
+# Nix / direnv local state (machine-local, regenerable via `nix develop`).
+.direnv/
+.nix-cargo/
+.nix-hex/
+.nix-mix/
+
+# Odin port render outputs (regenerable via odin/build/biofilm --ppm/--frames).
+anim/
+*.ppm
+*.mp4
+biofilms-odin.zip
+odin/compare/*.csv
+
+# Nix build output symlinks (regenerable via `nix build`).
+result*

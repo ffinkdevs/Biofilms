@@ -1,0 +1,89 @@
+// Field diffusion compute shader: melanin + nutrient reaction-diffusion.
+// One dispatch covers the whole lattice; one SSBO holds the entire Arena
+// (see cpm/arena.odin offsets). Two fields ping-pong via `src_is_a`.
+//
+// Why ONLY the fields live here: the CPM Metropolis step is random
+// gather/scatter with a 26-neighbour adhesion gather, per-site atomics
+// on cell volumes, and a data-dependent branch — memory-latency bound
+// with ~no arithmetic intensity. It runs slower on GPU than on CPU
+// SIMD for N<=60 and complicates determinism across layouts. The
+// Laplacian sweeps are the opposite: streaming, stencil, arithmetic-
+// light but bandwidth-heavy — exactly what compute + f32x8 SIMD do well.
+//
+// Binding model (bindless, single allocation):
+//   set 0, binding 0: readonly  lattice   (i32 N^3, offset off_lattice)
+//   set 0, binding 1: readonly  cell_id -> species LUT (rebuilt on death)
+//   set 0, binding 2: readwrite field A    (f32 N^3, ping-pong)
+//   set 0, binding 3: readwrite field B    (f32 N^3, ping-pong target)
+//   set 0, binding 4: readonly  melanin_drive (f32 N^3, offset off_drive)
+// Production uses ONE VkBuffer with the Arena layout and passes the
+// offsets as push constants; the split bindings above are the portable
+// fallback for drivers without buffer_device_address.
+#version 450
+layout(local_size_x = 8, local_size_y = 4, local_size_z = 4) in;
+
+layout(push_constant) uniform Push {
+    int n;            // lattice edge
+    float dt;         // field time step
+    float diff_coef;  // D_M or D_C
+    float wall_value; // nutrient wall pin (melanin: ignored, uses copy)
+    int mode;         // 0 = melanin, 1 = nutrient
+    int src_is_a;     // ping-pong selector
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Lattice { int data[]; } lattice;
+layout(set = 0, binding  = 1) readonly buffer SpeciesOf { int cell_species[]; } lut; // cell_id -> species+1 (0 = dead/medium)
+layout(set = 0, binding  = 2) buffer FieldA { float data[]; } fa;
+layout(set = 0, binding  = 3) buffer FieldB { float data[]; } fb;
+layout(set = 0, binding  = 4) readonly buffer Drive { float data[]; } drive; // melanin_drive field (== radiation at init)
+
+// Per-species tables (Table 2 midpoints, same order as cpm/params.odin).
+const float ALPHA_M[7] = float[7](0.10, 0.0, 0.14, 0.0, 0.065, 0.0, 0.0);
+const float UPTAKE[7]  = float[7](0.01, 0.02, 0.01, 0.03, 0.01, 0.03, 0.02);
+
+int lidx(ivec3 p) { return p.x + pc.n * (p.y + pc.n * p.z); }
+
+void main() {
+    ivec3 p = ivec3(gl_GlobalInvocationID.xyz);
+    if (p.x >= pc.n || p.y >= pc.n || p.z >= pc.n) return;
+    int i = lidx(p);
+
+    int sig = lattice.data[i];
+    if (sig == -1) {
+        // Wall: melanin keeps old value, nutrient pinned to wall supply.
+        float keep = pc.src_is_a == 1 ? fa.data[i] : fb.data[i];
+        float out_v = pc.mode == 1 ? pc.wall_value : keep;
+        if (pc.src_is_a == 1) fb.data[i] = out_v; else fa.data[i] = out_v;
+        return;
+    }
+
+    float c = pc.src_is_a == 1 ? fa.data[i] : fb.data[i];
+    int n = pc.n;
+    // 6-point Laplacian, Neumann BC (out-of-bounds contributes 0).
+    float lap = 0.0;
+    if (p.x > 0)     lap += (pc.src_is_a == 1 ? fa.data[i-1]   : fb.data[i-1])   - c;
+    if (p.x < n - 1) lap += (pc.src_is_a == 1 ? fa.data[i+1]   : fb.data[i+1])   - c;
+    if (p.y > 0)     lap += (pc.src_is_a == 1 ? fa.data[i-n]   : fb.data[i-n])   - c;
+    if (p.y < n - 1) lap += (pc.src_is_a == 1 ? fa.data[i+n]   : fb.data[i+n])   - c;
+    if (p.z > 0)     lap += (pc.src_is_a == 1 ? fa.data[i-n*n] : fb.data[i-n*n]) - c;
+    if (p.z < n - 1) lap += (pc.src_is_a == 1 ? fa.data[i+n*n] : fb.data[i+n*n]) - c;
+
+    // Species lookup: lut holds species+1 per cell id (index = cell_id).
+    int sp = -1;
+    if (sig > 0 && sig < lut.cell_species.length()) {
+        int v = lut.cell_species[sig];
+        if (v > 0) sp = v - 1;
+    }
+
+    float out_v;
+    if (pc.mode == 0) {
+        // Melanin: dM = D*lap + alpha(sp)*drive.
+        float alpha = 0.0;
+        if (sp >= 0 && (sp == 0 || sp == 2 || sp == 4)) alpha = ALPHA_M[sp];
+        out_v = max(0.0, c + pc.dt * (pc.diff_coef * lap + alpha * drive.data[i]));
+    } else {
+        float u = sp >= 0 ? UPTAKE[sp] : 0.0;
+        out_v = max(0.0, c + pc.dt * (pc.diff_coef * lap - u));
+    }
+    if (pc.src_is_a == 1) fb.data[i] = out_v; else fa.data[i] = out_v;
+}
