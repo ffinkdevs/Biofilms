@@ -97,7 +97,7 @@ radiolysis_destroy :: proc(rd: ^Radiolysis_State, allocator := context.allocator
 }
 
 membrane_peff :: proc(rd: ^Radiolysis_State) -> f64 {
-	return rd.params.p0 * math.exp(rd.params.alpha_p * rd.params.ddot_r * rd.t)
+	return rd.params.p0 * jexp_f64(rd.params.alpha_p * rd.params.ddot_r * rd.t)
 }
 
 radiolysis_step :: proc(rd: ^Radiolysis_State, dt: f64) {
@@ -121,7 +121,7 @@ radiolysis_euler :: proc(rd: ^Radiolysis_State, dt: f64) {
 	c := rd.c
 	s := rd.s
 
-	p_eff := rp.p0 * math.exp(rp.alpha_p * rp.ddot_r * rd.t)
+	p_eff := rp.p0 * jexp_f64(rp.alpha_p * rp.ddot_r * rd.t)
 	dm_dt := -rp.k_dam * rp.ddot_r * rd.m
 	uptake := rp.k_ads * rp.x_total + rp.k_red * rp.x_red
 
@@ -133,12 +133,14 @@ radiolysis_euler :: proc(rd: ^Radiolysis_State, dt: f64) {
 	dc[0] = rp.d_eff * 2.0 * (c[1] - c[0]) / (dr * dr) +
 		(-uptake * c[0] + rp.k_des * s[0])
 
-	// Interior finite-volume.
+	// Interior finite-volume. NOTE: denominator is r*(dr*dr), NOT
+	// (r*dr)*dr — Julia writes r_i*dr^2 and the association differs
+	// by 1 ulp (verified). Do not "simplify".
 	for i in 1..<(nr - 1) {
 		r := rd.r_grid[i]
 		diff := rp.d_eff *
 			((r + 0.5*dr) * (c[i+1] - c[i]) -
-			 (r - 0.5*dr) * (c[i] - c[i-1])) / (r * dr * dr)
+			 (r - 0.5*dr) * (c[i] - c[i-1])) / (r * (dr * dr))
 		dc[i] = diff + (-uptake * c[i] + rp.k_des * s[i])
 	}
 
@@ -149,7 +151,7 @@ radiolysis_euler :: proc(rd: ^Radiolysis_State, dt: f64) {
 		r := rd.r_grid[i]
 		diff := rp.d_eff *
 			((r + 0.5*dr) * (c_ghost - c[i]) -
-			 (r - 0.5*dr) * (c[i] - c[i-1])) / (r * dr * dr)
+			 (r - 0.5*dr) * (c[i] - c[i-1])) / (r * (dr * dr))
 		dc[i] = diff + (-uptake * c[i] + rp.k_des * s[i])
 	}
 
@@ -179,17 +181,22 @@ radial_biomass_means :: proc(s: ^Sim, nr: int) -> (x_total, x_red: f64) {
 	red := make([]f64, nr, context.temp_allocator)
 	counts := make([]int, nr, context.temp_allocator)
 	defer free_all(context.temp_allocator)
-	for z in 0..<n {
-		for y in 0..<n {
-			for x in 0..<n {
+	// Hoisted over z: radius, interior, and band index depend on (x,y)
+	// only (cylinder axis = z). Per-site sums accumulate exact 1.0s, so
+	// the visit order is bit-irrelevant; band vectors are identical.
+	for y in 0..<n {
+		for x in 0..<n {
+			dx := site_coord(x) - f64(n)*0.5
+			dy := site_coord(y) - f64(n)*0.5
+			r := math.sqrt(dx*dx + dy*dy)
+			if r > r_total {
+				continue // exterior column: contributes nothing
+			}
+			idx := int(round_half_even(r / dr))
+			if idx < 0 { idx = 0 }
+			if idx > nr - 1 { idx = nr - 1 }
+			for z in 0..<n {
 				i := lidx(n, x, y, z)
-				if s.arena.interior[i] == 0 { continue }
-				dx := f64(x) + 0.5 - f64(n)*0.5
-				dy := f64(y) + 0.5 - f64(n)*0.5
-				r := math.sqrt(dx*dx + dy*dy)
-				idx := int(math.round(r / dr))
-				if idx < 0 { idx = 0 }
-				if idx > nr - 1 { idx = nr - 1 }
 				counts[idx] += 1
 				sig := s.arena.lattice[i]
 				if sig > 0 && cell_alive(s, int(sig)) {
@@ -213,24 +220,29 @@ radial_biomass_means :: proc(s: ^Sim, nr: int) -> (x_total, x_red: f64) {
 }
 
 // Project the 1D radial contaminant c(r) onto the 3D lattice. Mirrors
-// radial_to_3d!: nearest-bin sample, interior sites only.
+// radial_to_3d!: nearest-bin sample, interior sites only. Band index
+// hoisted over z (see radial_biomass_means); pure writes, bit-exact.
 radial_to_3d :: proc(s: ^Sim, rd: ^Radiolysis_State) {
 	n := s.params.n
 	nr := rd.params.nr
 	r_total := rd.r_grid[nr-1]
 	dr := rd.r_grid[1] - rd.r_grid[0]
-	for z in 0..<n {
-		for y in 0..<n {
-			for x in 0..<n {
+	for y in 0..<n {
+		for x in 0..<n {
+			dx := site_coord(x) - f64(n)*0.5
+			dy := site_coord(y) - f64(n)*0.5
+			rr := math.sqrt(dx*dx + dy*dy)
+			if rr > f64(n)*0.5 {
+				continue // exterior column (r > R): untouched, as in Julia
+			}
+			r := rr / (f64(n)*0.5) * r_total
+			idx := int(round_half_even(r / dr))
+			if idx < 0 { idx = 0 }
+			if idx > nr - 1 { idx = nr - 1 }
+			cv := rd.c[idx]
+			for z in 0..<n {
 				i := lidx(n, x, y, z)
-				if s.arena.interior[i] == 0 { continue }
-				dx := f64(x) + 0.5 - f64(n)*0.5
-				dy := f64(y) + 0.5 - f64(n)*0.5
-				r := math.sqrt(dx*dx + dy*dy) / (f64(n)*0.5) * r_total
-				idx := int(math.round(r / dr))
-				if idx < 0 { idx = 0 }
-				if idx > nr - 1 { idx = nr - 1 }
-				s.arena.contaminant[i] = f32(rd.c[idx])
+				s.arena.contaminant[i] = cv
 			}
 		}
 	}

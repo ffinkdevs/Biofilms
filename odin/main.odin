@@ -1,10 +1,12 @@
 package main
 
 import "core:fmt"
+import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
 import "core:time"
+import "core:crypto/sha2"
 
 import cpm "cpm"
 import render "render"
@@ -39,6 +41,9 @@ Config :: struct {
 	stats:   bool,
 	cells:   int,
 	coupled: bool,
+	rng:     cpm.Rng_Kind,
+	trace:   bool, // machine-checkable per-MCS trace (Julia cross-check)
+	ensemble: bool, // machine-readable per-snapshot rows for ensembles
 }
 
 parse_args :: proc() -> Config {
@@ -92,6 +97,19 @@ parse_args :: proc() -> Config {
 		} else if a == "--coupled" {
 			c.coupled = true
 			i += 1
+		} else if a == "--rng" {
+			if i + 1 < len(args) {
+				v := strings.to_lower(args[i + 1])
+				c.rng = .Julia if v == "julia" else .Splitmix
+				i += 2
+			} else { i += 1 }
+		} else if a == "--trace" {
+			c.trace = true
+			i += 1
+		} else if a == "--ensemble" {
+			c.ensemble = true
+			c.stats = false
+			i += 1
 		} else if a == "--help" || a == "-h" {
 			fmt.println(usage())
 			os.exit(0)
@@ -110,6 +128,8 @@ usage :: proc() -> string {
           [--ppm out.ppm] [--width 1280] [--height 800] [--cells 6]
           [--no-coupled | --no-radiolysis]
           [--frames anim/frame --every 4]   # PPM per K MCS for video
+          [--rng splitmix|julia]            # julia = Julia 1.12 MT stream
+          [--ensemble]                      # ENSEMBLE rows per snapshot
 
   CSV lines match validate_serial.jl: CSV,seed,species,vol,ncells,mel,survived
 `
@@ -125,6 +145,61 @@ rd_mean :: proc(rd: cpm.Radiolysis_State) -> (c_mean, s_mean: f64) {
 	return c_mean / f64(rd.params.nr), s_mean / f64(rd.params.nr)
 }
 
+// SHA-256 hex of a byte slice (trace lattice/field identity).
+sha_hex :: proc(data: []u8) -> string {
+	ctx: sha2.Context_256
+	sha2.init_256(&ctx)
+	sha2.update(&ctx, data)
+	d: [32]u8
+	sha2.final(&ctx, d[:])
+	hex := "0123456789abcdef"
+	out := make([]u8, 64, context.temp_allocator)
+	for i in 0..<32 {
+		out[2*i + 0] = hex[d[i] >> 4]
+		out[2*i + 1] = hex[d[i] & 0xf]
+	}
+	return string(out)
+}
+
+bytes_of :: proc(s: $T/[]$E) -> []u8 {
+	return mem.slice_ptr((^u8)(raw_data(s)), len(s) * size_of(E))
+}
+
+// Machine-checkable trace: lattice/field hashes, per-cell volumes/COMs
+// (as u64 bit patterns), per-species snapshot stats. Byte-identical in
+// format to jl_trace.jl output for diffing.
+dump_trace :: proc(sim: ^cpm.Sim, rd: ^cpm.Radiolysis_State, seed: u64, m: int, coupled: bool) {
+	fmt.printf("TRACE %d %d LAT %s MEL %s NUT %s RAD %s ALIVE %d\n",
+		seed, m,
+		sha_hex(bytes_of(sim.arena.lattice)),
+		sha_hex(bytes_of(sim.arena.melanin)),
+		sha_hex(bytes_of(sim.arena.nutrient)),
+		sha_hex(bytes_of(sim.arena.radiation)),
+		cpm.count_alive(sim))
+	for id in 1..<sim.next_id {
+		if !cpm.cell_alive(sim, id) { continue }
+		cx, cy, cz := cpm.cell_com(sim, id)
+		fmt.printf("TRACECELL %d %d %d %d %d %d %d %d\n",
+			seed, m, id, cpm.cell_species(sim, id) + 1,
+			cpm.cell_volume(sim, id),
+			transmute(u64)cx, transmute(u64)cy, transmute(u64)cz)
+	}
+	snap := cpm.take_snapshot(sim)
+	for sp in 0..<cpm.N_SPECIES {
+		st := snap.species[sp]
+		fmt.printf("TRACESPEC %d %d %d %d %d %d %d\n",
+			seed, m, sp + 1, st.volume, st.n_cells,
+			transmute(u64)st.mean_r, transmute(u64)st.mean_mel)
+	}
+	if coupled && m > 0 {
+		fmt.printf("RDC %d %d %d %d %s %s %s\n",
+			seed, m, transmute(u64)rd.t, transmute(u64)rd.m,
+			sha_hex(bytes_of(rd.c)), sha_hex(bytes_of(rd.s)),
+			sha_hex(bytes_of(sim.arena.contaminant)))
+	}
+	free_all(context.temp_allocator)
+}
+
 main :: proc() {
 	cfg := parse_args()
 	layout_name := "aos" if cfg.layout == .AoS else ("soa" if cfg.layout == .SoA else "aosoa")
@@ -134,15 +209,21 @@ main :: proc() {
 	params.n_cells_per_species = cfg.cells
 
 	t0 := time.tick_now()
-	sim := cpm.sim_init(params, cfg.layout, cfg.seed)
+	sim := cpm.sim_init(params, cfg.layout, cfg.seed, cfg.rng)
 	defer cpm.sim_destroy(&sim)
 
 	rd := cpm.radiolysis_init(cpm.default_radiolysis_params(), f64(cfg.n) * 0.5)
 	defer cpm.radiolysis_destroy(&rd)
 
 	mode := "coupled" if cfg.coupled else "CPM-only"
-	fmt.printf("CPM biofilm (%s) — N=%d cells/species=%d layout=%s seed=%d MCS=%d\n",
-		mode, cfg.n, cfg.cells, layout_name, cfg.seed, cfg.mcs)
+	rng_name := "julia" if cfg.rng == .Julia else "splitmix"
+	fmt.printf("CPM biofilm (%s, %s) — N=%d cells/species=%d layout=%s seed=%d MCS=%d\n",
+		mode, rng_name, cfg.n, cfg.cells, layout_name, cfg.seed, cfg.mcs)
+
+
+	if cfg.trace {
+		dump_trace(&sim, &rd, cfg.seed, 0, cfg.coupled)
+	}
 
 	frame_idx := 0
 	dump_frame :: proc(sim: ^cpm.Sim, cfg: ^Config, mcs, idx: int) {
@@ -170,15 +251,27 @@ main :: proc() {
 			cpm.radiolysis_step(&rd, rd.params.dt_rd)
 			cpm.radial_to_3d(&sim, &rd)
 		}
-		cpm.update_fields(&sim, f32(rd.m) if cfg.coupled else 1.0)
+		cpm.update_fields(&sim, rd.m if cfg.coupled else 1.0)
 		cpm.update_centers_of_mass(&sim)
+		if cfg.trace {
+			dump_trace(&sim, &rd, cfg.seed, m, cfg.coupled)
+		}
 		if len(cfg.frames) > 0 && (m % cfg.every == 0 || m == cfg.mcs) {
 			dump_frame(&sim, &cfg, m, frame_idx)
 			frame_idx += 1
 		}
 		if m % params.snapshot_interval == 0 || m == cfg.mcs {
 			snap := cpm.take_snapshot(&sim)
-			fmt.printf("MCS %d alive=%d pair_e=%.2f\n", m, cpm.count_alive(&sim), snap.pair_e)
+			if cfg.ensemble {
+				for sp in 0..<cpm.N_SPECIES {
+					st := snap.species[sp]
+					fmt.printf("ENSEMBLE,%d,%d,%d,%d,%d,%.6f,%.6f\n",
+						cfg.seed, m, sp + 1, st.volume, st.n_cells,
+						st.mean_mel, st.mean_mel_parcel)
+				}
+			} else {
+				fmt.printf("MCS %d alive=%d pair_e=%.2f\n", m, cpm.count_alive(&sim), snap.pair_e)
+			}
 			if cfg.stats {
 				for sp in 0..<cpm.N_SPECIES {
 					st := snap.species[sp]

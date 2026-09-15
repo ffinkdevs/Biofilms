@@ -1,8 +1,14 @@
 package cpm
 
+import "core:math"
+
 // Canonical species registry. Authoritative order matches biofilms_potts.jl
 // SPECIES_NAMES[1..7] and FIG_COLORS. Do not reorder: HDF5 lineage labels,
 // J-matrix indices, and CSV columns all assume this order.
+//
+// Precision: all compute floats are f64 (Julia parity — Julia's CPMParams,
+// fields, and Hamiltonian are Float64 throughout). Rendering keeps its own
+// f32 palette; it never feeds back into dynamics.
 N_SPECIES :: 7
 
 CN :: 0 // C. neoformans      (radiotropic, melanin producer)
@@ -38,44 +44,44 @@ SPECIES_SHORT := [N_SPECIES]string{
 // Negative = drifts UP the dose gradient (toward axis). Dimensionless
 // in practice; see biofilms_potts.jl §1. Shipped values are inert at
 // T_cpm=5 (bias 1.00001 for CN/CS); the melanin term dominates.
-BETA_ION := [N_SPECIES]f32{-5e-5, 2.5e-5, -5e-5, 3e-3, 2.5e-4, 7.5e-2, 1e-2}
+BETA_ION := [N_SPECIES]f64{-5e-5, 2.5e-5, -5e-5, 3e-3, 2.5e-4, 7.5e-2, 1e-2}
 
 // Melanin production rate alpha_M per species (Table 2 midpoints).
-ALPHA_M := [N_SPECIES]f32{0.10, 0.0, 0.14, 0.0, 0.065, 0.0, 0.0}
+ALPHA_M := [N_SPECIES]f64{0.10, 0.0, 0.14, 0.0, 0.065, 0.0, 0.0}
 
 // Melanin coupling in dH: 0.5 for radiotropic species, else 0.
 // Ledgered as cpm.melanin_coupling; the term that actually moves the model.
-MEL_COEF := [N_SPECIES]f32{0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0}
+MEL_COEF := [N_SPECIES]f64{0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0}
 
 // Nutrient uptake per species.
-UPTAKE := [N_SPECIES]f32{0.01, 0.02, 0.01, 0.03, 0.01, 0.03, 0.02}
+UPTAKE := [N_SPECIES]f64{0.01, 0.02, 0.01, 0.03, 0.01, 0.03, 0.02}
 
 // Species diffusion Ds (Table 2 midpoints). Currently informational:
 // the CPM has no per-species motility temperature; kept for parity.
-DIFF_S := [N_SPECIES]f32{0.05, 0.25, 0.025, 0.50, 0.025, 0.40, 0.20}
+DIFF_S := [N_SPECIES]f64{0.05, 0.25, 0.025, 0.50, 0.025, 0.40, 0.20}
 
-is_radiotropic :: proc(s: int) -> bool {
+is_radiotropic :: #force_inline proc(s: int) -> bool {
 	return s == CN || s == CS
 }
 
-is_melanin_producer :: proc(s: int) -> bool {
+is_melanin_producer :: #force_inline proc(s: int) -> bool {
 	return s == CN || s == CS || s == AN
 }
 
 // Simulation parameters. Mirrors CPMParams in biofilms_potts.jl.
 CPM_Params :: struct {
 	n:                   int,     // lattice edge (N x N x N, cylindrical mask)
-	t_cpm:               f32,     // Metropolis temperature
-	lambda_v:            f32,     // volume constraint strength
+	t_cpm:               f64,     // Metropolis temperature
+	lambda_v:            f64,     // volume constraint strength
 	v_target:            i32,     // target volume per cell (sites)
-	i0:                  f32,     // source intensity at axis
-	kappa:               f32,     // radial attenuation
-	d_m:                 f32,     // melanin diffusion coefficient
-	d_c:                 f32,     // nutrient diffusion coefficient
-	dt_field:            f32,     // field update time step
-	c_wall:              f32,     // nutrient concentration at wall
-	gamma_mutual:        f32,     // pairwise attraction strength (diagnostic only)
-	sigma_mutual:        f32,     // pairwise range (diagnostic only)
+	i0:                  f64,     // source intensity at axis
+	kappa:               f64,     // radial attenuation
+	d_m:                 f64,     // melanin diffusion coefficient
+	d_c:                 f64,     // nutrient diffusion coefficient
+	dt_field:            f64,     // field update time step
+	c_wall:              f64,     // nutrient concentration at wall
+	gamma_mutual:        f64,     // pairwise attraction strength (diagnostic only)
+	sigma_mutual:        f64,     // pairwise range (diagnostic only)
 	n_cells_per_species: int,
 	snapshot_interval:   int,
 }
@@ -101,8 +107,8 @@ default_params :: proc() -> CPM_Params {
 
 // Adhesion matrix J, (N_SPECIES+1) x (N_SPECIES+1), row/col 0 = medium.
 // Lower J = more adhesive. Matches build_J_matrix() in both Julia ports.
-build_J :: proc() -> [8][8]f32 {
-	J: [8][8]f32
+build_J :: proc() -> [8][8]f64 {
+	J: [8][8]f64
 	for i in 0..<8 {
 		for j in 0..<8 {
 			J[i][j] = 12.0
@@ -132,21 +138,47 @@ build_J :: proc() -> [8][8]f32 {
 	return J
 }
 
-// 26-connected Moore neighbourhood offsets, precomputed once.
+// 26-connected Moore neighbourhood offsets, dz fastest.
+// Order matches Julia's `[(dx,dy,dz) for dx in -1:1 for dy in -1:1
+// for dz in -1:1 ...]` (last generator fastest) — the adhesion sum order
+// matters for bitwise parity, as does the rand(1:26) index mapping.
 NEIGHBOURS_26 := [26][3]i8{
-	{-1, -1, -1}, {0, -1, -1}, {1, -1, -1},
-	{-1,  0, -1}, {0,  0, -1}, {1,  0, -1},
-	{-1,  1, -1}, {0,  1, -1}, {1,  1, -1},
-	{-1, -1,  0}, {0, -1,  0}, {1, -1,  0},
-	{-1,  0,  0},             {1,  0,  0},
-	{-1,  1,  0}, {0,  1,  0}, {1,  1,  0},
-	{-1, -1,  1}, {0, -1,  1}, {1, -1,  1},
-	{-1,  0,  1}, {0,  0,  1}, {1,  0,  1},
-	{-1,  1,  1}, {0,  1,  1}, {1,  1,  1},
+	{-1, -1, -1}, {-1, -1, 0}, {-1, -1, 1},
+	{-1,  0, -1}, {-1,  0, 0}, {-1,  0, 1},
+	{-1,  1, -1}, {-1,  1, 0}, {-1,  1, 1},
+	{ 0, -1, -1}, { 0, -1, 0}, { 0, -1, 1},
+	{ 0,  0, -1},             { 0,  0, 1},
+	{ 0,  1, -1}, { 0,  1, 0}, { 0,  1, 1},
+	{ 1, -1, -1}, { 1, -1, 0}, { 1, -1, 1},
+	{ 1,  0, -1}, { 1,  0, 0}, { 1,  0, 1},
+	{ 1,  1, -1}, { 1,  1, 0}, { 1,  1, 1},
 }
 
 NEIGHBOURS_6 := [6][3]i8{
 	{1, 0, 0}, {-1, 0, 0},
 	{0, 1, 0}, {0, -1, 0},
 	{0, 0, 1}, {0, 0, -1},
+}
+
+// Site coordinate in Julia's 1-based convention as Float64: lattice index
+// `c` (0-based) holds Julia coordinate `c+1`. All field values, COMs, and
+// radial distances use this convention for bitwise Julia parity.
+site_coord :: #force_inline proc(c: int) -> f64 {
+	return f64(c) + 1.0
+}
+
+// Banker's rounding (round-half-to-even) for non-negative values,
+// matching Julia's round(Int, x). Odin's math.round rounds half away
+// from zero — identical except on exact .5 fractions, which do occur in
+// radial binning. Only used where Julia rounds (radiolysis binning).
+round_half_even :: proc(x: f64) -> i64 {
+	fl := math.floor(x)
+	f := x - fl
+	if f < 0.5 {
+		return i64(fl)
+	} else if f > 0.5 {
+		return i64(fl) + 1
+	}
+	fi := i64(fl)
+	return fi if fi & 1 == 0 else fi + 1
 }

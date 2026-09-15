@@ -22,7 +22,7 @@ run_coupled :: proc(p: cpm.CPM_Params, seed: u64, n_mcs: int) -> (cpm.Sim, cpm.R
 		}
 		cpm.radiolysis_step(&rd, rd.params.dt_rd)
 		cpm.radial_to_3d(&s, &rd)
-		cpm.update_fields(&s, f32(rd.m))
+		cpm.update_fields(&s, rd.m)
 		cpm.update_centers_of_mass(&s)
 	}
 	return s, rd

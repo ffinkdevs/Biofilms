@@ -62,7 +62,7 @@ test_simd_matches_scalar :: proc(t: ^testing.T) {
 	cpm.mcs_step(&a); cpm.mcs_step(&b)
 	cpm.update_melanin_scalar(&a)
 	cpm.update_melanin_simd(&b)
-	maxd := f32(0)
+	maxd := f64(0)
 	for i in 0..<len(a.arena.melanin) {
 		d := abs(a.arena.melanin[i] - b.arena.melanin[i])
 		if d > maxd { maxd = d }

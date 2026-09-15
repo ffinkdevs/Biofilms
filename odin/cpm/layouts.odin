@@ -16,9 +16,9 @@ Cell_AoS :: struct {
 	species:    u8,
 	alive:      bool,
 	volume:     i32,
-	com_x:      f32,
-	com_y:      f32,
-	com_z:      f32,
+	com_x:      f64,
+	com_y:      f64,
+	com_z:      f64,
 	lineage:    i32,
 	parent:     i32,
 	generation: i32,
@@ -33,9 +33,9 @@ Cells_SoA :: struct {
 	species:    []u8,
 	alive:      []bool,
 	volume:     []i32,
-	com_x:      []f32,
-	com_y:      []f32,
-	com_z:      []f32,
+	com_x:      []f64,
+	com_y:      []f64,
+	com_z:      []f64,
 	lineage:    []i32,
 	parent:     []i32,
 	generation: []i32,
@@ -45,7 +45,7 @@ Cells_SoA :: struct {
 }
 
 // Array of Structures of Arrays: blocked SoA, BLOCK cells per block.
-// BLOCK=8 matches AVX2 f32x8 / AVX-512 halves and the Vulkan subgroup
+// BLOCK=8 matches AVX2 f64x4 x2 / AVX-512 halves and the Vulkan subgroup
 // size used in shaders/field_diffusion.comp. Within a block every
 // field is a fixed array, so a block fits in a few cache lines and
 // vectorises cleanly; across blocks it streams like SoA.
@@ -56,9 +56,9 @@ Cell_Block :: struct {
 	species:    [AOSOA_BLOCK]u8,
 	alive:      [AOSOA_BLOCK]bool,
 	volume:     [AOSOA_BLOCK]i32,
-	com_x:      [AOSOA_BLOCK]f32,
-	com_y:      [AOSOA_BLOCK]f32,
-	com_z:      [AOSOA_BLOCK]f32,
+	com_x:      [AOSOA_BLOCK]f64,
+	com_y:      [AOSOA_BLOCK]f64,
+	com_z:      [AOSOA_BLOCK]f64,
 	lineage:    [AOSOA_BLOCK]i32,
 	parent:     [AOSOA_BLOCK]i32,
 	generation: [AOSOA_BLOCK]i32,
@@ -89,9 +89,9 @@ cells_soa_alloc :: proc(cap: int, allocator := context.allocator) -> Cells_SoA {
 		species    = make([]u8, cap, allocator),
 		alive      = make([]bool, cap, allocator),
 		volume     = make([]i32, cap, allocator),
-		com_x      = make([]f32, cap, allocator),
-		com_y      = make([]f32, cap, allocator),
-		com_z      = make([]f32, cap, allocator),
+		com_x      = make([]f64, cap, allocator),
+		com_y      = make([]f64, cap, allocator),
+		com_z      = make([]f64, cap, allocator),
 		lineage    = make([]i32, cap, allocator),
 		parent     = make([]i32, cap, allocator),
 		generation = make([]i32, cap, allocator),
@@ -126,15 +126,15 @@ cells_aosoa_free :: proc(s: ^Cells_AoSoA, allocator := context.allocator) {
 
 // ── lane accessors (uniform 0-based cell-slot index) ──
 
-aos_get :: proc(cells: []Cell_AoS, slot: int) -> Cell_AoS {
+aos_get :: #force_inline proc(cells: []Cell_AoS, slot: int) -> Cell_AoS {
 	return cells[slot]
 }
 
-soa_species :: proc(s: ^Cells_SoA, slot: int) -> u8 {
+soa_species :: #force_inline proc(s: ^Cells_SoA, slot: int) -> u8 {
 	return s.species[slot]
 }
 
-aosoa_loc :: proc(slot: int) -> (block: int, lane: int) {
+aosoa_loc :: #force_inline proc(slot: int) -> (block: int, lane: int) {
 	return slot / AOSOA_BLOCK, slot % AOSOA_BLOCK
 }
 
@@ -143,12 +143,12 @@ aosoa_species :: proc(s: ^Cells_AoSoA, slot: int) -> u8 {
 	return s.blocks[b].species[l]
 }
 
-aosoa_alive :: proc(s: ^Cells_AoSoA, slot: int) -> bool {
+aosoa_alive :: #force_inline proc(s: ^Cells_AoSoA, slot: int) -> bool {
 	b, l := aosoa_loc(slot)
 	return s.blocks[b].alive[l]
 }
 
-aosoa_volume :: proc(s: ^Cells_AoSoA, slot: int) -> i32 {
+aosoa_volume :: #force_inline proc(s: ^Cells_AoSoA, slot: int) -> i32 {
 	b, l := aosoa_loc(slot)
 	return s.blocks[b].volume[l]
 }

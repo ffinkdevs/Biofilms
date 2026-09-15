@@ -31,10 +31,11 @@ rng_u64 :: proc(r: ^Rng) -> u64 {
 	return splitmix64_next(r)
 }
 
-// Uniform float in [0, 1). 24-bit mantissa, matching JACC u01().
-rng_f32 :: proc(r: ^Rng) -> f32 {
-	v := splitmix64_next(r) >> 40 // top 24 bits
-	return f32(v) * (1.0 / 16777216.0)
+// Uniform float in [0, 1). 53-bit mantissa (splitmix64 fast path;
+// Julia parity uses jrand_f64 instead).
+rng_f64 :: proc(r: ^Rng) -> f64 {
+	v := splitmix64_next(r) >> 11 // top 53 bits
+	return f64(v) * (1.0 / 9007199254740992.0)
 }
 
 // Uniform int in [lo, hi] inclusive. Rejection-free modulo is fine here:

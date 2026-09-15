@@ -8,12 +8,12 @@ import "core:mem"
 // same layout maps 1:1 onto a single Vulkan VkBuffer with push-constant
 // offsets — see shaders/design.md):
 //
-//   [lattice i32 N^3][interior u8 N^3][radiation f32][melanin f32][nutrient f32]
-//   [melanin_drive f32][contaminant f32][scratch f32 N^3]
+//   [lattice i32 N^3][interior u8 N^3][radiation f64][melanin f64][nutrient f64]
+//   [melanin_drive f64][contaminant f64][scratch f64 N^3]
 //
 // Rationale: a single allocation means one map/unmap, one barrier, one
 // descriptor (bindless index 0). The CPM lattice stays host-visible;
-// the float fields are device-friendly (f32, 64B-aligned rows for AVX).
+// the float fields are device-friendly (f64, 64B-aligned rows for AVX).
 //Interior is u8 (not bit-packed) so GPU threads can byte-load without
 // bit unpacking; the 8x memory cost is negligible vs the float fields.
 Arena :: struct {
@@ -22,12 +22,12 @@ Arena :: struct {
 	n3:            int,
 	lattice:       []i32,  // N^3,  0=medium, -1=wall, >0=cell id
 	interior:      []u8,   // N^3,  1=inside cylinder
-	radiation:     []f32,  // static Beer-Lambert field (Hamiltonian signal)
-	melanin:       []f32,  // reaction-diffusion field
-	melanin_drive: []f32,  // copy of radiation at init (legacy parity)
-	nutrient:      []f32,  // wall-fed gradient, consumed by cells
-	contaminant:   []f32,  // mobile contaminant c(r) projected to 3D (coupled mode)
-	scratch:       []f32,  // double-buffer target for field updates
+	radiation:     []f64,  // static Beer-Lambert field (Hamiltonian signal)
+	melanin:       []f64,  // reaction-diffusion field
+	melanin_drive: []f64,  // copy of radiation at init (legacy parity)
+	nutrient:      []f64,  // wall-fed gradient, consumed by cells
+	contaminant:   []f64,  // mobile contaminant c(r) projected to 3D (coupled mode)
+	scratch:       []f64,  // double-buffer target for field updates
 	// Byte offsets of each region inside backing (for Vulkan parity).
 	off_lattice:   int,
 	off_interior:  int,
@@ -52,12 +52,12 @@ arena_bytes_required :: proc(n: int) -> int {
 	total := 0
 	total = align_up(total, ALIGN); total += n3 * size_of(i32)
 	total = align_up(total, ALIGN); total += n3 * size_of(u8)
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // radiation
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // melanin
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // drive
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // nutrient
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // contaminant
-	total = align_up(total, ALIGN); total += n3 * size_of(f32) // scratch
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // radiation
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // melanin
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // drive
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // nutrient
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // contaminant
+	total = align_up(total, ALIGN); total += n3 * size_of(f64) // scratch
 	total = align_up(total, ALIGN)
 	return total
 }
@@ -83,28 +83,28 @@ arena_init :: proc(n: int, allocator := context.allocator) -> Arena {
 	off += a.n3 * size_of(u8)
 
 	off = align_up(off, ALIGN); a.off_radiation = off
-	a.radiation = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.radiation = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	off = align_up(off, ALIGN); a.off_melanin = off
-	a.melanin = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.melanin = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	off = align_up(off, ALIGN); a.off_drive = off
-	a.melanin_drive = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.melanin_drive = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	off = align_up(off, ALIGN); a.off_nutrient = off
-	a.nutrient = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.nutrient = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	off = align_up(off, ALIGN); a.off_contam = off
-	a.contaminant = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.contaminant = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	off = align_up(off, ALIGN); a.off_scratch = off
-	a.scratch = mem.slice_ptr((^f32)(uintptr(base + off)), a.n3)
-	off += a.n3 * size_of(f32)
+	a.scratch = mem.slice_ptr((^f64)(uintptr(base + off)), a.n3)
+	off += a.n3 * size_of(f64)
 
 	a.backing = mem.slice_ptr((^u8)(uintptr(base)), a.total_bytes + ALIGN)
 	// Keep the raw base for free(); backing[0] == raw[0].
@@ -121,10 +121,10 @@ arena_destroy :: proc(a: ^Arena, allocator := context.allocator) {
 // Linear index, x fastest (matches Julia's x,y,z loop order logically;
 // Julia is column-major but we never compare raw buffers cross-language,
 // only CSV statistics, so layout parity is intentionally NOT claimed).
-lidx :: proc(n, x, y, z: int) -> int {
+lidx :: #force_inline proc(n, x, y, z: int) -> int {
 	return x + n * (y + n * z)
 }
 
-in_bounds :: proc(n, x, y, z: int) -> bool {
+in_bounds :: #force_inline proc(n, x, y, z: int) -> bool {
 	return x >= 0 && y >= 0 && z >= 0 && x < n && y < n && z < n
 }

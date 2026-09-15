@@ -34,6 +34,37 @@ odin test tests/
 one frame per 4 MCS to 400 at 12 fps, encoded with
 `ffmpeg -framerate 12 -i f_%d.ppm -c:v libx264 -pix_fmt yuv420p`.
 
+## Per-seed numerical parity with Julia
+
+`--rng julia` replays Julia 1.12's `MersenneTwister` stream and takes the
+scalar exact-order field path (slower; for validation, not production).
+`--trace` prints a machine-checkable per-MCS trace (lattice/field SHA-256,
+per-cell volumes + COM bit-patterns, per-species stats); `compare/` holds
+the Julia side emitting byte-identical lines:
+
+```
+TRACE_N=16 TRACE_CELLS=2 TRACE_MCS=8 TRACE_SEED=42 julia compare/jl_trace.jl
+biofilm --n 16 --mcs 8 --seed 42 --cells 2 --rng julia --no-coupled --trace
+diff <(...) <(...)   # identical: lattice, fields, volumes, COMs, snapshots
+```
+
+Verified identical for seeds 42 (8 MCS), 7 and 123 (30 MCS) at N=16,
+plain and coupled, plus N=20 at 100 MCS (2222 trace lines) — every
+Metropolis decision agrees. Note Julia 1.12 does NOT call libm
+for `exp` — it evaluates `base/special/exp.jl` inline (table reduction +
+minimax kernel with fused multiply-adds), which differs from libm by
+1 ulp on ~10% of inputs; `cpm/julia_exp.odin` ports exactly that
+(including its 256-entry table), verified 4015/4015 bit-exact at both
+`-o:none` and `-o:speed`. The coupled
+PDE path is verified too (RD state bit-identical). Requirements for
+parity that are easy to break — do not "clean up" without re-running the
+trace diff: 1-based site coordinates, `NEIGHBOURS_26` order (dz fastest),
+scalar Laplacian order (x+,x-,y+,y-,z+,z-), banker's rounding in
+radiolysis binning, stale-if-zero COMs, two RNG instances (placement vs
+stepping), float draw only on the `dH > 0` path, and FP association:
+`r*(dr*dr)`, never `(r*dr)*dr` — Julia's `dr^2` lowers to `dr*dr`, and
+the two associations differ by 1 ulp (caught live at MCS 7, lane 33).
+
 ## Layouts (all three ship, selectable at runtime)
 
 ```
@@ -71,10 +102,10 @@ GPU upgrade path, all three tested equivalent.
 
 ## SIMD (shipped, on by default)
 
-`cpm/fields_simd.odin`: the two reaction-diffusion sweeps over 8-wide
-x-runs with `#simd[8]f32`, unaligned loads/stores
+`cpm/fields_simd.odin`: the two reaction-diffusion sweeps over 4-wide
+`#simd[4]f64` x-runs with unaligned loads/stores
 (`intrinsics.unaligned_load/store` — plain `^Vec` dereference emits
-aligned MOVAPS and faults on 4-byte-aligned rows). Per-lane production
+aligned MOVAPS and faults on unaligned rows). Per-lane production
 terms (`α_M`, uptake) are gathered scalar then lifted with
 `simd.from_array`; negatives clamped lane-wise. Scalar reference stays in
 `cpm/sim.odin`; `test_simd_matches_scalar` asserts max diff < 1e-4
@@ -116,7 +147,57 @@ contract). What is checked:
   all CSVs above hold in both modes.
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
-  coupled determinism — 7/7 pass.
+  coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
+  bit-parity (20 points) — 10/10 pass.
+
+## Performance (exactness-preserving only)
+
+N=40, 100 MCS (interleaved medians, `-o:speed`; "after" adds
+`-no-bounds-check`):
+
+| workload | before | after | speedup |
+|---|---|---|---|
+| julia, coupled (default) | 519 ms | 338 ms | **1.54×** |
+| julia, CPM-only | 460 ms | 327 ms | **1.41×** |
+| splitmix, coupled | 443 ms | 312 ms | **1.42×** |
+
+Everything below was verified by the `--trace` diff to change no bit:
+
+| kept | what | measured |
+|---|---|---|
+| lazy rejection threshold | NDL's `t` needs a 64-bit div but is only consulted with probability ~s/2⁶⁴; compute it inside the taken branch | small positive, kept (provably neutral) |
+| `#force_inline` hot accessors | `cell_alive/species/volume`, `lidx`, samplers — kills call overhead in the 26-neighbour adhesion loop | ~11% |
+| hoisted radial loops | radius/interior/band depend on (x,y) only; was recomputed (with sqrt+div) per site per MCS in biomass + projection | ~17% |
+| `-no-bounds-check` (production binary only) | every indexed access is guarded or clamped; traces prove none fire | ~13% |
+| `#force_inline dsfmt_rec` | call per state word per refill | minor, kept |
+
+Multiplicative ≈ 0.64 (~1.5×). Profile after: `mcs_step` ~75%,
+fields ~8%, radiolysis sweeps ~5%, COM/snapshots ~2%.
+
+Deliberately NOT done:
+
+- **Threads (measured, rejected).** Fields + projection are
+  disjoint-write parallel and were threaded (8 workers) with
+  bit-exact results proven by trace diff — but net was ±10% noise
+  around zero at N=40: the win in the sweeps (~3× on fields) is eaten
+  by migration/cache effects on the dominant sequential Markov chain
+  (verified: the `mcs_step` section itself got *slower* with workers
+  present). 150 lines of concurrency for ~0% is a bad trade in
+  verified code.
+- **Anything touching `mcs_step` arithmetic.** It is ~75% of runtime
+  and ~60% of that is the fixed RNG stream (24M NDL draws + dSFMT
+  refills per N=40 run — same values required, only codegen can move).
+  Adhesion sums, volume terms, and acceptance tests cannot be skipped,
+  reordered, or fused without changing rounding. This is the floor for
+  exact reproduction; beating it means a faster (not identical) model.
+- **`--rng splitmix` keeps its own stream.** The exactness work above
+  applies to `--rng julia`; splitmix benefits from the same codegen
+  (inline/bounds/SIMD) with its own unchanged values.
+
+Caveats: medians on a shared box (load ~7), so treat second digits as
+noise. `-o:speed` vs `-o:none` parity is covered by the same trace
+diffs (run the compare scripts under both flags when touching FP
+code — `-o:speed` is known to reassociate aggressively).
 
 ## Files
 
@@ -128,12 +209,15 @@ odin/
   cpm/arena.odin       ONE huge allocation (bindless-ready offsets)
   cpm/layouts.odin     AoS / SoA / AoSoA canonical forms
   cpm/sim.odin         init, Metropolis step, delta_H, snapshots
-  cpm/fields_simd.odin #simd[8]f32 field sweeps (default path)
+  cpm/fields_simd.odin #simd[4]f64 field sweeps (splitmix mode)
+  cpm/julia_exp.odin   Julia 1.12 inline exp port (bit-exact, both opt levels)
   cpm/radiolysis.odin  1D radiodialysis PDE + radial<->3D coupling (coupled mode)
+  cpm/dsfmt.odin       pure-Odin dSFMT19937 (Julia-MT core, verified)
+  cpm/julia_rng.odin   Julia 1.12 MersenneTwister front-end (bit-exact stream)
   render/palette.odin  FIG_COLORS parity (screenshot legend)
   render/voxels.odin   occupied-site gather + face-culling masks
   render/ppm.odin      headless isometric rasterizer (CI check)
   viewer/main.odin     raylib orbit viewer (publication view)
   shaders/             compute shader + placement rationale
-  tests/               odin test suite (layouts, SIMD, determinism, coupling)
+  tests/               odin test suite (layouts, SIMD, determinism, coupling, RNG, exp)
 ```
