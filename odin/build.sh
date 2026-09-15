@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Build the Odin biofilm port. Headless binary needs only Odin in PATH;
-# the viewer additionally needs raylib in the link path
-# (nix-shell -p raylib, or add pkgs.raylib to the flake devShell).
+# the viewer additionally needs raylib in the link path (`nix develop`).
 set -euo pipefail
 cd "$(dirname "$0")"
 

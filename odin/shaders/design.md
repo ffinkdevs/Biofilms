@@ -27,24 +27,26 @@ neighbour loads, ~10 FLOPs, streaming access, no branches except the
 wall pin. This is the bandwidth-bound stencil that SIMD and compute both
 love:
 
-- **CPU default (shipped):** `cpm/fields_simd.odin` processes 8-wide
-  x-runs with `#simd[8]f32` (AVX2 width). Same width as the AoSoA block
-  (`AOSOA_BLOCK = 8`) and the compute subgroup below, so tuning one
-  width tunes all three. Scalar reference in `cpm/sim.odin` is kept for
-  tests (tolerance 1e-5; SIMD reassociates the Laplacian sum).
+- **CPU default (shipped):** `cpm/fields_simd.odin` processes 4-wide
+  x-runs with `#simd[4]f64` (one AVX2 vector). Same width family as the
+  AoSoA block (`AOSOA_BLOCK = 8`, two vectors) and the compute subgroup
+  below. Scalar reference in `cpm/sim.odin` is kept for tests
+  (tolerance 1e-4; SIMD reassociates the Laplacian sum). Julia-parity
+  mode (`--rng julia`) always takes the scalar exact-order path.
 - **GPU upgrade (provided, opt-in):** `shaders/field_diffusion.comp`
   runs the same stencil as a Vulkan compute dispatch
-  (`8×4×4 = 128` threads/workgroup = 16 f32x8 vectors). Expected win:
-  ~4–8× on the field sweeps at N=60, where the two sweeps dominate
-  profile (~60% of wall time). The Metropolis step still runs on CPU
-  and the lattice uploads once per MCS (N=40: 256 KB — negligible).
+  (`8×4×4 = 128` threads/workgroup = 32 f64x4 vectors). Expected win:
+  ~4–8× on the field sweeps at N=60 — though the sweeps are now ~8% of
+  wall time (see README profile), so the absolute prize is small. The
+  Metropolis step still runs on CPU and the lattice uploads once per
+  MCS (N=40: 256 KB — negligible).
 
 ## 3. Single huge allocation (bindless)
 
 `cpm/arena.odin` allocates **one** backing buffer and slices it:
 
 ```
-[lattice i32][interior u8][radiation f32][melanin f32][drive f32][nutrient f32][contaminant f32][scratch f32]
+[lattice i32][interior u8][radiation f64][melanin f64][drive f64][nutrient f64][contaminant f64][scratch f64]
 ```
 
 every region 64-byte aligned, offsets recorded in the struct. The Vulkan

@@ -69,7 +69,7 @@ the two associations differ by 1 ulp (caught live at MCS 7, lane 33).
 
 ```
 --layout aos    Array of Structures:  []Cell  (one struct per cell)
---layout soa    Structure of Arrays:  struct of []u8/[]i32/[]f32 columns
+--layout soa    Structure of Arrays:  struct of []u8/[]i32/[]f64 columns
 --layout aosoa  Array of Structures of Arrays: []Cell_Block, BLOCK=8
 ```
 
@@ -80,19 +80,21 @@ bit-identical integer state in every layout** (volumes, counts), pinned by
 `tests/layouts_test.odin`. Float accumulations (COM, melanin means) agree
 to 1e-4.
 
-`AOSOA_BLOCK = 8` is one choice everywhere: AVX2 `#simd[8]f32` width,
-Vulkan subgroup size in `field_diffusion.comp`, one cache line per
-`com_x` lane-group. Measured N=40/100 MCS (O2):
+`AOSOA_BLOCK = 8` is one choice everywhere: two AVX2 `#simd[4]f64`
+vectors, the Vulkan subgroup size in `field_diffusion.comp`, one cache
+line per `com_x` lane-group. Measured N=40/100 MCS, splitmix, CPM-only:
 
 | layout | wall | CSV vs AoS |
 |---|---|---|
-| aos | 0.24 s | — |
-| soa | 0.24 s | identical |
-| aosoa | 0.24 s | identical |
+| aos | 0.19 s | — |
+| soa | 0.19 s | identical |
+| aosoa | 0.19 s | identical |
 
 Coupled mode (PDE + projection + pairwise diagnostic, i.e. the full Julia
-workload) costs ~0.31 s/run at N=40 — about 30% over CPM-only, dominated
-by the radial→3D projection sweep; the 1D PDE itself is negligible.
+workload) adds the fixed radial sweeps (~0.1 s per 100 MCS at N=40):
+splitmix plain 0.19 s → coupled 0.33 s; in `--rng julia` mode the slower
+RNG dominates and coupling hides in noise (plain 0.33 s → coupled
+0.34 s). The 1D PDE itself is negligible either way.
 
 No layout wins at N=40 because the scalar Metropolis core dominates and
 costs the same everywhere. SoA/AoSoA pay off in the streaming field
@@ -130,25 +132,58 @@ compute pays for the sweeps at N≥60; the Metropolis core never moves.
 
 ## Validation vs Julia
 
-Same seed is NOT the same trajectory across languages (splitmix64 here vs
-MersenneTwister there — statistical parity only, per `validate_serial.jl`
-contract). What is checked:
+Default splitmix stream is statistically equivalent only — same seed is
+NOT the same trajectory as Julia (splitmix64 here vs MersenneTwister
+there, per the `validate_serial.jl` contract). `--rng julia` is
+bit-identical per seed (see parity section). What is checked in each
+mode:
 
 - CSV columns match `validate_serial.jl` format (`CSV,seed,species,vol,ncells,mel,survived`).
-- N=40, 6 cells/species, 100 MCS, seed 42: melanin ordering CS > CN > AN
-  (1.62 > 1.31 > 0.85 here vs 1.44 for CS in the Julia report — same
-  ordering, same magnitudes, different stream), 42/42 parcels persist,
-  all layouts identical.
-- Coupled parity (default mode = Julia's `main_coupled` workload): N=40,
-  100 MCS, seed 42 gives m=0.7786 (Julia 0.779), P_eff/P₀=2.72
-  (Julia e≈2.72), c_mean=0.0239 (Julia 0.024) — closed-form-dominated
-  quantities agreeing to 3 decimals. Lattice trajectory is provably
-  unaffected by coupling (one-way; `test_coupling_moves_no_sites`), so
-  all CSVs above hold in both modes.
+- N=40, 6 cells/species, 100 MCS, seed 42, coupled, `--rng julia`:
+  `tests/fixtures/serial_seed42.csv` reproduces 7/7 plus membrane m
+  (0.7786 vs 0.77856) — stream and model settled in one run.
+- Lattice trajectory is provably unaffected by coupling (one-way;
+  `test_coupling_moves_no_sites`), so CPM-only runs share the same
+  lattice path.
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
   coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
   bit-parity (20 points) — 10/10 pass.
+
+## Ensemble: melanin ordering across seeds
+
+`--ensemble` prints machine-readable rows per snapshot with both the
+published observable (`mel_site`, volume-weighted mean over occupied
+sites) and the per-parcel mean (`mel_parcel`). 256 seeds (42–297),
+N=40/p6/400 MCS, plain, `--rng julia` —
+`odin/compare/ensemble_n40_p6_42-297_odin.csv` (35,840 rows, ~40 s wall
+at 10-way parallel):
+
+| MCS | CS>CN>AN | CS top | CN−AN mean/min/sd |
+|---|---|---|---|
+| 100 | 237/256 (92.6%) | 249/256 | 0.355 / −0.290 / 0.206 |
+| 200 | 211/256 (82.4%) | 234/256 | 0.476 / −0.780 / 0.375 |
+| 300 | 201/256 (78.5%) | 225/256 | 0.555 / −1.253 / 0.509 |
+| 400 | 190/256 (74.2%) | 217/256 | 0.615 / −1.354 / 0.611 |
+
+P(16/16 | p=0.926) ≈ 29% — a 15/16 and a 16/16 run are the same result.
+The mean gap grows with MCS while the spread grows faster.
+
+Seeds 42–57 subset, site vs parcel side by side (sample sd, matching the
+Julia table's digits):
+
+| MCS | site CS>CN>AN | site CS top | parcel CS>CN>AN | parcel CS top | CN−AN mean/min/sd |
+|---|---|---|---|---|---|
+| 100 | 16/16 | 16/16 | 15/16 | 16/16 | 0.326 / 0.00065 / 0.248 |
+| 200 | 11/16 | 15/16 | 11/16 | 15/16 | 0.400 / −0.18121 / 0.387 |
+| 300 | 11/16 | 15/16 | 11/16 | 15/16 | 0.423 / −0.31304 / 0.490 |
+| 400 | 9/16 | 12/16 | 9/16 | 12/16 | 0.453 / −0.40656 / 0.570 |
+
+Site reproduces the Julia table cell-for-cell except MCS-200 CS-top
+(15/16 here vs 16/16 printed — seed 54, CN 2.470696 > CS 2.345212
+either way). Averages disagree on 3/1024 (seed,mcs) pairs; seed 43
+MCS 100 flips sign between them (+0.00065 vs −0.00055). The observable
+choice doesn't move the finding.
 
 ## Performance (exactness-preserving only)
 
@@ -220,4 +255,6 @@ odin/
   viewer/main.odin     raylib orbit viewer (publication view)
   shaders/             compute shader + placement rationale
   tests/               odin test suite (layouts, SIMD, determinism, coupling, RNG, exp)
+  compare/jl_trace.jl  Julia side of the --trace diff (plain + coupled)
+  compare/ensemble_n40_p6_42-297_odin.csv  256-seed ensemble rows (committed for citation)
 ```

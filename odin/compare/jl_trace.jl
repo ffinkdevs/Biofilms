@@ -1,10 +1,12 @@
 #!/usr/bin/env julia
 # Machine-checkable execution trace for cross-validating the Odin port.
-# Mirrors the plain (uncoupled) run_simulation loop exactly:
-#   init_state -> per MCS: mcs_step! + update_melanin! + update_nutrient!
-#   + update_centers_of_mass!
-# Prints TRACE/TRACECELL/TRACESPEC lines; the Odin binary's --trace flag
-# prints byte-identical lines for diffing.
+# Mirrors run_simulation_coupled's per-MCS call order exactly:
+#   mcs_step! + (radiolysis PDE, radial_to_3d!, membrane-scaled nutrient) +
+#   update_melanin! + update_nutrient[_coupled]! + update_centers_of_mass!
+# Set TRACE_COUPLED=1 for the coupled loop (default plain). Prints
+# TRACE/TRACECELL/TRACESPEC lines plus RDC lines (RD state) in coupled
+# mode; the Odin binary's --trace flag prints byte-identical lines for
+# diffing. N, cells, MCS, seed via TRACE_N/TRACE_CELLS/TRACE_MCS/TRACE_SEED.
 
 using Printf, SHA
 

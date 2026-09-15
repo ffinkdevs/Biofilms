@@ -130,6 +130,7 @@ usage :: proc() -> string {
           [--frames anim/frame --every 4]   # PPM per K MCS for video
           [--rng splitmix|julia]            # julia = Julia 1.12 MT stream
           [--ensemble]                      # ENSEMBLE rows per snapshot
+          [--trace] [--no-stats]            # byte-identical trace / quiet
 
   CSV lines match validate_serial.jl: CSV,seed,species,vol,ncells,mel,survived
 `

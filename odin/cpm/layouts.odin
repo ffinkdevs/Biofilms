@@ -45,8 +45,8 @@ Cells_SoA :: struct {
 }
 
 // Array of Structures of Arrays: blocked SoA, BLOCK cells per block.
-// BLOCK=8 matches AVX2 f64x4 x2 / AVX-512 halves and the Vulkan subgroup
-// size used in shaders/field_diffusion.comp. Within a block every
+// BLOCK=8 matches the AVX2 #simd[4]f64 field width (two vectors) and the
+// Vulkan subgroup size used in shaders/field_diffusion.comp. Within a
 // field is a fixed array, so a block fits in a few cache lines and
 // vectorises cleanly; across blocks it streams like SoA.
 // Padding lanes (beyond n_alive) have alive=false and volume=0.
