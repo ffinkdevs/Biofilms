@@ -45,6 +45,42 @@ test_layout_equivalence :: proc(t: ^testing.T) {
 		}
 		testing.expect(t, cpm.count_alive(&a) == cpm.count_alive(&b))
 		testing.expect(t, cpm.count_alive(&a) == cpm.count_alive(&c))
+
+		// H1: one full dose cycle must also agree, including the three
+		// response fields (dose/state/expression). Without this the test
+		// above passes over a port whose new fields disagree by layout.
+		rp := cpm.default_response_params()
+		G := cpm.g_of_t(rp.t_active_h, cpm.RESP_MU)
+		sims := [3]^cpm.Sim{&a, &b, &c}
+		for sim in sims {
+			cpm.assign_dose_uniform(sim, 5.0)
+			_ = cpm.response_cycle(sim, rp, G, rp.cycle_hours)
+		}
+		for id in 1..<a.next_id {
+			testing.expectf(t, cpm.cell_alive(&a, id) == cpm.cell_alive(&b, id) &&
+				cpm.cell_alive(&a, id) == cpm.cell_alive(&c, id),
+				"seed %d id %d liveness differs by layout", seed, id)
+			if !cpm.cell_alive(&a, id) {
+				continue
+			}
+			testing.expectf(t, cpm.cell_volume(&a, id) == cpm.cell_volume(&b, id) &&
+				cpm.cell_volume(&a, id) == cpm.cell_volume(&c, id),
+				"seed %d id %d volume differs by layout", seed, id)
+			testing.expectf(t, cpm.cell_dose(&a, id) == cpm.cell_dose(&b, id) &&
+				cpm.cell_dose(&a, id) == cpm.cell_dose(&c, id),
+				"seed %d id %d dose differs by layout", seed, id)
+			testing.expectf(t, cpm.cell_state(&a, id) == cpm.cell_state(&b, id) &&
+				cpm.cell_state(&a, id) == cpm.cell_state(&c, id),
+				"seed %d id %d state differs by layout", seed, id)
+			testing.expectf(t, cpm.cell_expr(&a, id) == cpm.cell_expr(&b, id) &&
+				cpm.cell_expr(&a, id) == cpm.cell_expr(&c, id),
+				"seed %d id %d expression differs by layout", seed, id)
+		}
+		testing.expect(t, cpm.count_alive(&a) == cpm.count_alive(&b))
+		testing.expect(t, cpm.count_alive(&a) == cpm.count_alive(&c))
+		testing.expect(t, cpm.assert_no_dead_sigmas(&a))
+		testing.expect(t, cpm.assert_no_dead_sigmas(&b))
+		testing.expect(t, cpm.assert_no_dead_sigmas(&c))
 	}
 }
 

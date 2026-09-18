@@ -105,6 +105,46 @@ default_params :: proc() -> CPM_Params {
 	}
 }
 
+// Cell lifecycle states for the growth/survival response module
+// (spec/response_growth_survival.md §1). Numeric values are pinned:
+// zero-valued registry slots must read as viable so pre-module code
+// paths (which never set the field) keep working unchanged.
+CELL_VIABLE :: u8(1)
+CELL_MITOTIC :: u8(2) // transient within the division step
+CELL_DYING  :: u8(3) // mitotic catastrophe; resorbing toward cull
+
+// Growth/survival response parameters. Values are DECLARED, not tuned
+// (spec §2, Tamborino et al. 2025 EBRT fit on NCI-H69; reference vectors
+// in PRRT-spatial-CPM spec/reference_vectors.json):
+//   alpha = 0.24 Gy^-1, beta = 0.06 Gy^-2 (NOT the PRRT-fitted pair —
+//     those already embed protraction and G would double-count it)
+//   T_rep = 1.5 h (declared choice; Tamborino publishes no explicit value)
+//   T_active = 96 h exposure window for the per-cycle Lea-Catcheside G
+//   sigma_div = 0.10 heritable lognormal drift (study3_run.py:47)
+//   T_doubling = 58.4 h reference doubling (report band, not dynamics)
+//   cycle_hours = 1344 h (56-day study3 window) for the doubling report
+Response_Params :: struct {
+	alpha:        f64,
+	beta:         f64,
+	t_rep_h:      f64,
+	t_active_h:   f64,
+	sigma_div:    f64,
+	t_doubling_h: f64,
+	cycle_hours:  f64,
+}
+
+default_response_params :: proc() -> Response_Params {
+	return Response_Params{
+		alpha        = 0.24,
+		beta         = 0.06,
+		t_rep_h      = 1.5,
+		t_active_h   = 96.0,
+		sigma_div    = 0.10,
+		t_doubling_h = 58.4,
+		cycle_hours  = 1344.0,
+	}
+}
+
 // Adhesion matrix J, (N_SPECIES+1) x (N_SPECIES+1), row/col 0 = medium.
 // Lower J = more adhesive. Matches build_J_matrix() in both Julia ports.
 build_J :: proc() -> [8][8]f64 {

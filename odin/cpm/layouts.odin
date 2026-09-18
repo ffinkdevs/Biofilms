@@ -23,6 +23,9 @@ Cell_AoS :: struct {
 	parent:     i32,
 	generation: i32,
 	birth_mcs:  i32,
+	dose:       f64, // accumulated Gy this cycle (reset by survival check, A2)
+	state:      u8,  // CELL_* lifecycle state (1 viable default)
+	expr:       f64, // heritable expression trait (1.0 default)
 }
 
 // Structure of Arrays: one array per field, uniform stride.
@@ -40,6 +43,9 @@ Cells_SoA :: struct {
 	parent:     []i32,
 	generation: []i32,
 	birth_mcs:  []i32,
+	dose:       []f64,
+	state:      []u8,
+	expr:       []f64,
 	count:      int, // live+dead slots; live count tracked separately
 	n_alive:    int,
 }
@@ -63,6 +69,9 @@ Cell_Block :: struct {
 	parent:     [AOSOA_BLOCK]i32,
 	generation: [AOSOA_BLOCK]i32,
 	birth_mcs:  [AOSOA_BLOCK]i32,
+	dose:       [AOSOA_BLOCK]f64,
+	state:      [AOSOA_BLOCK]u8,
+	expr:       [AOSOA_BLOCK]f64,
 }
 
 Cells_AoSoA :: struct {
@@ -96,6 +105,9 @@ cells_soa_alloc :: proc(cap: int, allocator := context.allocator) -> Cells_SoA {
 		parent     = make([]i32, cap, allocator),
 		generation = make([]i32, cap, allocator),
 		birth_mcs  = make([]i32, cap, allocator),
+		dose       = make([]f64, cap, allocator),
+		state      = make([]u8, cap, allocator),
+		expr       = make([]f64, cap, allocator),
 		count      = cap,
 	}
 }
@@ -116,12 +128,78 @@ cells_soa_free :: proc(s: ^Cells_SoA, allocator := context.allocator) {
 	delete(s.parent, allocator)
 	delete(s.generation, allocator)
 	delete(s.birth_mcs, allocator)
+	delete(s.dose, allocator)
+	delete(s.state, allocator)
+	delete(s.expr, allocator)
 	s.count = 0
 }
 
 cells_aosoa_free :: proc(s: ^Cells_AoSoA, allocator := context.allocator) {
 	delete(s.blocks, allocator)
 	s.cap = 0
+}
+
+// Grow all three registries by doubling slots. New slots are zero-valued
+// (dead, dose 0, expression 0 — set explicitly on use). Uses
+// context.allocator, so callers must grow and destroy under the same
+// allocator they allocated with (true for sim_init/sim_destroy/tests,
+// which all use the default). Needed by cell_divide: every division is
+// net +1 slot and a dividing sim outgrows its founder cap within cycles.
+grow_registry_aos :: proc(cells: ^[]Cell_AoS) {
+	nb := make([]Cell_AoS, len(cells) * 2)
+	copy(nb, cells^)
+	delete(cells^)
+	cells^ = nb
+}
+
+grow_registry_soa :: proc(s: ^Cells_SoA) {
+	grow :: proc(dst: ^[]f64, n: int) {
+		nb := make([]f64, n * 2)
+		copy(nb, dst^)
+		delete(dst^)
+		dst^ = nb
+	}
+	gi32 :: proc(dst: ^[]i32, n: int) {
+		nb := make([]i32, n * 2)
+		copy(nb, dst^)
+		delete(dst^)
+		dst^ = nb
+	}
+	gu8 :: proc(dst: ^[]u8, n: int) {
+		nb := make([]u8, n * 2)
+		copy(nb, dst^)
+		delete(dst^)
+		dst^ = nb
+	}
+	gbool :: proc(dst: ^[]bool, n: int) {
+		nb := make([]bool, n * 2)
+		copy(nb, dst^)
+		delete(dst^)
+		dst^ = nb
+	}
+	n := s.count
+	gu8(&s.species, n)
+	gbool(&s.alive, n)
+	gi32(&s.volume, n)
+	grow(&s.com_x, n)
+	grow(&s.com_y, n)
+	grow(&s.com_z, n)
+	gi32(&s.lineage, n)
+	gi32(&s.parent, n)
+	gi32(&s.generation, n)
+	gi32(&s.birth_mcs, n)
+	grow(&s.dose, n)
+	gu8(&s.state, n)
+	grow(&s.expr, n)
+	s.count = n * 2
+}
+
+grow_registry_aosoa :: proc(s: ^Cells_AoSoA) {
+	nb := make([]Cell_Block, len(s.blocks) * 2)
+	copy(nb, s.blocks[:])
+	delete(s.blocks)
+	s.blocks = nb
+	s.cap = len(nb) * AOSOA_BLOCK
 }
 
 // ── lane accessors (uniform 0-based cell-slot index) ──

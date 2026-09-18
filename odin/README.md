@@ -148,7 +148,7 @@ mode:
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
   coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
-  bit-parity (20 points) — 10/10 pass.
+  bit-parity (20 points), response ladder (14 gates) — 24/24 pass.
 
 ## Ensemble: melanin ordering across seeds
 
@@ -184,6 +184,32 @@ Site reproduces the Julia table cell-for-cell except MCS-200 CS-top
 either way). Averages disagree on 3/1024 (seed,mcs) pairs; seed 43
 MCS 100 flips sign between them (+0.00065 vs −0.00055). The observable
 choice doesn't move the finding.
+
+## Growth/survival response module (`cpm/response.odin`)
+
+Protracted linear-quadratic survival with the Lea-Catcheside factor,
+evaluated as a stochastic transition at mitosis
+(PRRT-spatial-CPM `spec/response_growth_survival.md` + Amendments A1–A4).
+Minimal extension flipping `response.growth_survival` from unsupported
+to supported. Declarations (checklist §1):
+
+| Declaration | Value |
+|---|---|
+| Death and refill semantics | `B` (`V_target = 0`, Metropolis resorption; A3 cull below 2 sites, logged) |
+| Division trigger | volume-gated (volume ≥ 2·V_target; manuscript-specified, not an adaptation) |
+| RNG stream for survival draws | splitmix `s.rng`, ascending cell id — never `jr` (H2: parity fixtures own that stream) |
+| RNG stream for drift normals | splitmix `s.rng`, Marsaglia polar (no cached spare) |
+| `sigma_div` | pinned `0.10` |
+| Amendments implemented | A1, A2, A3, A4 — all yes |
+
+Each dose cycle: unconditional survival sweep over every live cell (A1;
+draw `u <= SF` lives, else dying) → dose reset to 0 for all live cells
+(A2; daughters born at 0) → division loop over viable cells at doubling
+volume with lognormal drift → COM reconcile → A3 resorb sweep → share
+(A4, refuse above 50×) + doubling-time report. Dose arrives
+pre-accumulated per cycle; no MCS↔hours mapping enters the module.
+`odin test tests/response_test.odin` carries the eleven-gate ladder,
+each with its rejection input.
 
 ## Performance (exactness-preserving only)
 
@@ -249,6 +275,7 @@ odin/
   cpm/radiolysis.odin  1D radiodialysis PDE + radial<->3D coupling (coupled mode)
   cpm/dsfmt.odin       pure-Odin dSFMT19937 (Julia-MT core, verified)
   cpm/julia_rng.odin   Julia 1.12 MersenneTwister front-end (bit-exact stream)
+  cpm/response.odin    growth/survival module: G, SF, cycle driver (Semantics B)
   render/palette.odin  FIG_COLORS parity (screenshot legend)
   render/voxels.odin   occupied-site gather + face-culling masks
   render/ppm.odin      headless isometric rasterizer (CI check)

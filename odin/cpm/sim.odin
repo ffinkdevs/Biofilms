@@ -22,6 +22,17 @@ Sim :: struct {
 	aos:         []Cell_AoS,
 	soa:         Cells_SoA,
 	aosoa:       Cells_AoSoA,
+	// A3 deletion log (culled dying cells). Grown by append, freed by
+	// sim_destroy under the same allocator rule as the registries.
+	cull_log:    [dynamic]Cull_Event,
+}
+
+// One logged A3 deletion: a dying cell culled below 2 sites.
+Cull_Event :: struct {
+	mcs:     int,
+	cell_id: int,
+	species: int,
+	volume:  int, // actual volume at cull (0 or 1)
 }
 
 // RNG source. Splitmix is the fast default; Julia replays Julia 1.12's
@@ -74,6 +85,7 @@ sim_init :: proc(p: CPM_Params, layout: Layout, seed: u64, kind: Rng_Kind = .Spl
 }
 
 sim_destroy :: proc(s: ^Sim, allocator := context.allocator) {
+	delete(s.cull_log) // dynamic array frees with its own allocator
 	arena_destroy(&s.arena, allocator)
 	if s.layout == .AoS {
 		delete(s.aos, allocator)
@@ -197,6 +209,7 @@ cell_set_new :: #force_inline proc(s: ^Sim, slot: int, species: int, volume: int
 			species = u8(species), alive = true, volume = i32(volume),
 			com_x = cx, com_y = cy, com_z = cz,
 			lineage = i32(slot + 1), parent = 0, generation = 0, birth_mcs = 0,
+			dose = 0.0, state = CELL_VIABLE, expr = 1.0,
 		}
 	case .SoA:
 		s.soa.species[slot] = u8(species)
@@ -209,6 +222,9 @@ cell_set_new :: #force_inline proc(s: ^Sim, slot: int, species: int, volume: int
 		s.soa.parent[slot] = 0
 		s.soa.generation[slot] = 0
 		s.soa.birth_mcs[slot] = 0
+		s.soa.dose[slot] = 0.0
+		s.soa.state[slot] = CELL_VIABLE
+		s.soa.expr[slot] = 1.0
 		s.soa.n_alive += 1
 	case .AoSoA:
 		b, l := aosoa_loc(slot)
@@ -222,6 +238,9 @@ cell_set_new :: #force_inline proc(s: ^Sim, slot: int, species: int, volume: int
 		s.aosoa.blocks[b].parent[l] = 0
 		s.aosoa.blocks[b].generation[l] = 0
 		s.aosoa.blocks[b].birth_mcs[l] = 0
+		s.aosoa.blocks[b].dose[l] = 0.0
+		s.aosoa.blocks[b].state[l] = CELL_VIABLE
+		s.aosoa.blocks[b].expr[l] = 1.0
 		s.aosoa.n_alive += 1
 	}
 }
@@ -240,6 +259,245 @@ cell_kill :: #force_inline proc(s: ^Sim, id: int) {
 			s.aosoa.n_alive -= 1
 		}
 	}
+}
+
+// ── growth/survival response fields (all three layouts; H1) ──
+
+cell_dose :: #force_inline proc(s: ^Sim, id: int) -> f64 {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   return s.aos[slot].dose
+	case .SoA:   return s.soa.dose[slot]
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		return s.aosoa.blocks[b].dose[l]
+	}
+	return 0
+}
+
+cell_set_dose :: #force_inline proc(s: ^Sim, id: int, d: f64) {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   s.aos[slot].dose = d
+	case .SoA:   s.soa.dose[slot] = d
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		s.aosoa.blocks[b].dose[l] = d
+	}
+}
+
+cell_state :: #force_inline proc(s: ^Sim, id: int) -> u8 {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   return s.aos[slot].state
+	case .SoA:   return s.soa.state[slot]
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		return s.aosoa.blocks[b].state[l]
+	}
+	return 0
+}
+
+cell_set_state :: #force_inline proc(s: ^Sim, id: int, st: u8) {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   s.aos[slot].state = st
+	case .SoA:   s.soa.state[slot] = st
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		s.aosoa.blocks[b].state[l] = st
+	}
+}
+
+cell_expr :: #force_inline proc(s: ^Sim, id: int) -> f64 {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   return s.aos[slot].expr
+	case .SoA:   return s.soa.expr[slot]
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		return s.aosoa.blocks[b].expr[l]
+	}
+	return 0
+}
+cell_set_expr :: #force_inline proc(s: ^Sim, id: int, e: f64) {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   s.aos[slot].expr = e
+	case .SoA:   s.soa.expr[slot] = e
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		s.aosoa.blocks[b].expr[l] = e
+	}
+}
+
+cell_lineage :: #force_inline proc(s: ^Sim, id: int) -> int {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   return int(s.aos[slot].lineage)
+	case .SoA:   return int(s.soa.lineage[slot])
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		return int(s.aosoa.blocks[b].lineage[l])
+	}
+	return 0
+}
+
+cell_generation :: #force_inline proc(s: ^Sim, id: int) -> int {
+	slot := id - 1
+	switch s.layout {
+	case .AoS:   return int(s.aos[slot].generation)
+	case .SoA:   return int(s.soa.generation[slot])
+	case .AoSoA:
+		b, l := aosoa_loc(slot)
+		return int(s.aosoa.blocks[b].generation[l])
+	}
+	return 0
+}
+
+// Effective volume target: dying cells resorb toward 0 (Semantics B).
+// Identical to params.v_target whenever no dying cell exists, so all
+// pre-module paths are bit-unaffected.
+cell_vtarget :: #force_inline proc(s: ^Sim, id: int) -> i32 {
+	if cell_state(s, id) == CELL_DYING {
+		return 0
+	}
+	return s.params.v_target
+}
+
+// Double registry slots when division would overflow. See layouts.odin
+// for the allocator rule.
+ensure_cell_cap :: proc(s: ^Sim, need: int) {
+	for s.next_id + need - 1 > s.n_slots {
+		switch s.layout {
+		case .AoS:   grow_registry_aos(&s.aos)
+		case .SoA:   grow_registry_soa(&s.soa)
+		case .AoSoA: grow_registry_aosoa(&s.aosoa)
+		}
+		s.n_slots *= 2
+	}
+}
+
+// Binary fission (H3): parent's lattice sites split between two daughters
+// in ascending scan order (deterministic), volumes halved, parent removed.
+// Daughters are born with dose 0 (A2), viable state, and caller-supplied
+// expression values. Returns (0, 0) if the parent is missing or empty.
+cell_divide :: proc(s: ^Sim, parent: int, e_a, e_b: f64) -> (da, db: int) {
+	if !cell_alive(s, parent) {
+		return 0, 0
+	}
+	n := s.params.n
+	// Collect parent sites in ascending lattice order.
+	n_sites := 0
+	for i in 0..<s.arena.n3 {
+		if s.arena.lattice[i] == i32(parent) {
+			n_sites += 1
+		}
+	}
+	if n_sites == 0 {
+		return 0, 0
+	}
+	ensure_cell_cap(s, 2)
+	da = s.next_id
+	db = s.next_id + 1
+	s.next_id += 2
+
+	da_vol := n_sites / 2
+	// db_vol := n_sites - da_vol
+	seen := 0
+	for i in 0..<s.arena.n3 {
+		if s.arena.lattice[i] == i32(parent) {
+			if seen < da_vol {
+				s.arena.lattice[i] = i32(da)
+			} else {
+				s.arena.lattice[i] = i32(db)
+			}
+			seen += 1
+		}
+	}
+	_ = n
+
+	psp := cell_species(s, parent)
+	// Snapshot parent registry data before killing (fresh ids only, so
+	// direct reads are safe, but keep it explicit).
+	p_lin, p_par, p_gen := cell_lineage(s, parent), parent, cell_generation(s, parent) + 1
+	p_cx, p_cy, p_cz := cell_com(s, parent)
+	cell_set_new(s, da - 1, psp, da_vol, p_cx, p_cy, p_cz)
+	cell_set_new(s, db - 1, psp, n_sites - da_vol, p_cx, p_cy, p_cz)
+	cell_set_expr(s, da, e_a)
+	cell_set_expr(s, db, e_b)
+	dids := [2]int{da, db}
+	for id in dids {
+		slot := id - 1
+		switch s.layout {
+		case .AoS:
+			s.aos[slot].lineage = i32(p_lin)
+			s.aos[slot].parent = i32(p_par)
+			s.aos[slot].generation = i32(p_gen)
+			s.aos[slot].birth_mcs = i32(s.current_mcs)
+		case .SoA:
+			s.soa.lineage[slot] = i32(p_lin)
+			s.soa.parent[slot] = i32(p_par)
+			s.soa.generation[slot] = i32(p_gen)
+			s.soa.birth_mcs[slot] = i32(s.current_mcs)
+		case .AoSoA:
+			b, l := aosoa_loc(slot)
+			s.aosoa.blocks[b].lineage[l] = i32(p_lin)
+			s.aosoa.blocks[b].parent[l] = i32(p_par)
+			s.aosoa.blocks[b].generation[l] = i32(p_gen)
+			s.aosoa.blocks[b].birth_mcs[l] = i32(s.current_mcs)
+		}
+	}
+	cell_kill(s, parent) // no sites left under the parent sigma; see H4
+	return da, db
+}
+
+// A3 cull: a dying cell below 2 sites is deleted outright and its sites
+// freed (set to medium), with the deletion logged. Returns false when
+// there is nothing to cull. Callers must run resorb_sweep over time;
+// resorption itself happens through normal Metropolis competition.
+cull_dying :: proc(s: ^Sim, id: int) -> bool {
+	if !cell_alive(s, id) { return false }
+	if cell_state(s, id) != CELL_DYING { return false }
+	if cell_volume(s, int(id)) >= 2 { return false }
+	freed := 0
+	for i in 0..<s.arena.n3 {
+		if s.arena.lattice[i] == i32(id) {
+			s.arena.lattice[i] = 0
+			freed += 1
+		}
+	}
+	_ = freed
+	append(&s.cull_log, Cull_Event{
+		mcs = s.current_mcs, cell_id = id,
+		species = cell_species(s, id), volume = int(cell_volume(s, id)),
+	})
+	cell_kill(s, id)
+	return true
+}
+
+// Sweep all live dying cells for A3 culls. Returns the culled count.
+resorb_sweep :: proc(s: ^Sim) -> int {
+	n := 0
+	for id in 1..<s.next_id {
+		if cull_dying(s, id) {
+			n += 1
+		}
+	}
+	return n
+}
+
+// H4 invariant: no lattice entry may name a dead cell. False means a
+// kill path leaked a sigma (the A3 hazard); true is proved, not assumed,
+// by asserting it in tests after every cull.
+assert_no_dead_sigmas :: proc(s: ^Sim) -> bool {
+	for i in 0..<s.arena.n3 {
+		sig := s.arena.lattice[i]
+		if sig > 0 && !cell_alive(s, int(sig)) {
+			return false
+		}
+	}
+	return true
 }
 
 // ── field + geometry init ──
@@ -368,15 +626,16 @@ compute_delta_H :: proc(s: ^Sim, sx, sy, sz, tx, ty, tz: int) -> f64 {
 
 	dH := site_adhesion(s, tx, ty, tz, sigma_s) - site_adhesion(s, tx, ty, tz, sigma_t)
 
-	// Volume: lambda*((V±1-Vt)^2-(V-Vt)^2).
+	// Volume: lambda*((V±1-Vt)^2-(V-Vt)^2). Vt is per-cell so dying
+	// cells resorb toward 0 (Semantics B); identical otherwise.
 	if sigma_s > 0 {
 		V := cell_volume(s, int(sigma_s))
-		d := V - s.params.v_target
+		d := V - cell_vtarget(s, int(sigma_s))
 		dH += s.params.lambda_v * f64(2*d + 1)
 	}
 	if sigma_t > 0 {
 		V := cell_volume(s, int(sigma_t))
-		d := V - s.params.v_target
+		d := V - cell_vtarget(s, int(sigma_t))
 		dH += s.params.lambda_v * f64(-2*d + 1)
 	}
 
