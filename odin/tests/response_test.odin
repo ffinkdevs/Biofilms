@@ -439,8 +439,43 @@ test_resp_H4_no_dead_sigmas :: proc(t: ^testing.T) {
 	testing.expect(t, cpm.assert_no_dead_sigmas(&s))
 }
 
-// ---- H4 liveness: the A3 cull fires on a resorbed dyer ----
+// ---- Audit: orphan sites + volume drift (their PR #46, ported) ----
 
+@(test)
+test_resp_audit :: proc(t: ^testing.T) {
+	s := make_rsim(20260711, 120)
+	defer cpm.sim_destroy(&s)
+	// Healthy sim: zero orphans, zero drifts.
+	o, d := cpm.audit_lattice(&s)
+	testing.expectf(t, o == 0 && d == 0, "healthy audit = (%d, %d)", o, d)
+	// Planted orphan: kill-without-clear on a sited cell.
+	victim := 0
+	for id in 1..<s.next_id {
+		if cpm.cell_alive(&s, id) && cpm.cell_volume(&s, id) > 4 {
+			victim = id
+			break
+		}
+	}
+	testing.expect(t, victim != 0)
+	cpm.cell_kill(&s, victim)
+	o, _ = cpm.audit_lattice(&s)
+	testing.expectf(t, o > 0, "planted orphan must count, got %d", o)
+	// Tampered volume: +5 with no lattice change must count as drift.
+	s2 := make_rsim(20260712, 120)
+	defer cpm.sim_destroy(&s2)
+	target := 0
+	for id in 1..<s2.next_id {
+		if cpm.cell_alive(&s2, id) {
+			target = id
+			break
+		}
+	}
+	cpm.cell_add_volume(&s2, target, 5)
+	_, d2 := cpm.audit_lattice(&s2)
+	testing.expectf(t, d2 > 0, "tampered volume must count as drift, got %d", d2)
+}
+
+// ---- H4 liveness: the A3 cull fires on a resorbed dyer ----
 @(test)
 test_resp_A3_cull :: proc(t: ^testing.T) {
 	s := make_rsim(20260710, 120)

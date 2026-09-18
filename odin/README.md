@@ -148,7 +148,7 @@ mode:
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
   coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
-  bit-parity (20 points), response ladder (14 gates) — 24/24 pass.
+  bit-parity (20 points), response ladder (14 gates), lattice audit — 25/25 pass.
 
 ## Ensemble: melanin ordering across seeds
 
@@ -195,8 +195,7 @@ to supported. Declarations (checklist §1):
 
 | Declaration | Value |
 |---|---|
-| Death and refill semantics | `B` (`V_target = 0`, Metropolis resorption; A3 cull below 2 sites, logged) |
-| Division trigger | volume-gated (volume ≥ 2·V_target; manuscript-specified, not an adaptation) |
+| Death and refill semantics | `B` (`V_target = 0`, Metropolis resorption; A3 cull below 2 sites, logged) || Division trigger | volume-gated (volume ≥ 2·V_target; manuscript-specified, not an adaptation) |
 | RNG stream for survival draws | splitmix `s.rng`, ascending cell id — never `jr` (H2: parity fixtures own that stream) |
 | RNG stream for drift normals | splitmix `s.rng`, Marsaglia polar (no cached spare) |
 | `sigma_div` | pinned `0.10` |
@@ -209,7 +208,10 @@ volume with lognormal drift → COM reconcile → A3 resorb sweep → share
 (A4, refuse above 50×) + doubling-time report. Dose arrives
 pre-accumulated per cycle; no MCS↔hours mapping enters the module.
 `odin test tests/response_test.odin` carries the eleven-gate ladder,
-each with its rejection input.
+each with its rejection input. `audit_lattice` ports their PR #46 guard:
+it counts orphan sites plus registry-vs-recount volume drift (the pairing
+the COM reconcile would otherwise overwrite unseen); tests assert zero
+on healthy sims and nonzero on planted violations.
 
 ## Performance (exactness-preserving only)
 

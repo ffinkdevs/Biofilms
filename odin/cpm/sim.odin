@@ -500,6 +500,42 @@ assert_no_dead_sigmas :: proc(s: ^Sim) -> bool {
 	return true
 }
 
+// Full lattice audit (their H4 follow-up, PR aurascoper/PRRT-spatial-CPM
+// #46 ported): counts orphan sites (sigma naming a dead/missing cell)
+// and volume drifts (registry volume disagreeing with counted sites).
+// This is the pairing nothing else checks: the COM reconcile below
+// overwrites incremental volumes with recounts, destroying the evidence
+// that the ±1 bookkeeping drifted — so compare BEFORE overwriting.
+//
+// Deliberately NOT folded into update_centers_of_mass: the hot loop is
+// parity-frozen and the audit runs in tests, where one extra traversal
+// costs nothing. Returns (orphans, drifts).
+audit_lattice :: proc(s: ^Sim) -> (orphans, drifts: int) {
+	counts := make([]int, s.n_slots, context.temp_allocator)
+	defer free_all(context.temp_allocator)
+	for i in 0..<s.arena.n3 {
+		sig := s.arena.lattice[i]
+		if sig <= 0 {
+			continue
+		}
+		slot := int(sig) - 1
+		if slot < 0 || slot >= s.n_slots || !cell_alive(s, int(sig)) {
+			orphans += 1
+			continue
+		}
+		counts[slot] += 1
+	}
+	for id in 1..<s.next_id {
+		if !cell_alive(s, id) {
+			continue
+		}
+		if int(cell_volume(s, id)) != counts[id - 1] {
+			drifts += 1
+		}
+	}
+	return orphans, drifts
+}
+
 // ── field + geometry init ──
 
 @(private)
