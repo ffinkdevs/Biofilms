@@ -382,6 +382,11 @@ ensure_cell_cap :: proc(s: ^Sim, need: int) {
 // in ascending scan order (deterministic), volumes halved, parent removed.
 // Daughters are born with dose 0 (A2), viable state, and caller-supplied
 // expression values. Returns (0, 0) if the parent is missing or empty.
+//
+// Ids are NEVER reused: every division retires one id and takes two, so
+// loops over 1..<next_id grow with history. That cost is accepted
+// deliberately — parent/lineage fields cite ids, and reuse would make
+// genealogy ambiguous. Bound: slots grow ≤ 2x divisions.
 cell_divide :: proc(s: ^Sim, parent: int, e_a, e_b: f64) -> (da, db: int) {
 	if !cell_alive(s, parent) {
 		return 0, 0
@@ -397,6 +402,10 @@ cell_divide :: proc(s: ^Sim, parent: int, e_a, e_b: f64) -> (da, db: int) {
 	if n_sites == 0 {
 		return 0, 0
 	}
+	// Mitotic is transient within this step only: set here on the
+	// success path (never on the (0, 0) paths), parent removed below,
+	// so no cell can stay mitotic forever.
+	cell_set_state(s, parent, CELL_MITOTIC)
 	ensure_cell_cap(s, 2)
 	da = s.next_id
 	db = s.next_id + 1
@@ -744,6 +753,11 @@ mcs_step :: proc(s: ^Sim) {
 			cell_kill(s, id)
 		}
 	}
+	// A3 resorb sweep every step: a dying cell below 2 sites cannot wait
+	// for the cycle end (it would persist as a refill barrier all window).
+	// No-op when no cell is dying: no RNG consumed, no state touched, so
+	// all pre-module traces are bit-identical with it present.
+	resorb_sweep(s)
 }
 
 // ── coupled fields (scalar reference; SIMD fast path in fields_simd.odin) ──

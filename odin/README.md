@@ -148,7 +148,7 @@ mode:
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
   coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
-  bit-parity (20 points), response ladder (14 gates), lattice audit — 25/25 pass.
+  bit-parity (20 points), response ladder (16 tests), lattice audit — 26/26 pass.
 
 ## Ensemble: melanin ordering across seeds
 
@@ -195,23 +195,41 @@ to supported. Declarations (checklist §1):
 
 | Declaration | Value |
 |---|---|
-| Death and refill semantics | `B` (`V_target = 0`, Metropolis resorption; A3 cull below 2 sites, logged) || Division trigger | volume-gated (volume ≥ 2·V_target; manuscript-specified, not an adaptation) |
+| Death and refill semantics | `B` (`V_target = 0`, Metropolis resorption; A3 cull below 2 sites, logged) |
+| Division trigger | volume-gated (volume ≥ 2·V_target; manuscript-specified, not an adaptation) |
 | RNG stream for survival draws | splitmix `s.rng`, ascending cell id — never `jr` (H2: parity fixtures own that stream) |
 | RNG stream for drift normals | splitmix `s.rng`, Marsaglia polar (no cached spare) |
 | `sigma_div` | pinned `0.10` |
 | Amendments implemented | A1, A2, A3, A4 — all yes |
 
 Each dose cycle: unconditional survival sweep over every live cell (A1;
-draw `u <= SF` lives, else dying) → dose reset to 0 for all live cells
-(A2; daughters born at 0) → division loop over viable cells at doubling
-volume with lognormal drift → COM reconcile → A3 resorb sweep → share
-(A4, refuse above 50×) + doubling-time report. Dose arrives
-pre-accumulated per cycle; no MCS↔hours mapping enters the module.
-`odin test tests/response_test.odin` carries the eleven-gate ladder,
-each with its rejection input. `audit_lattice` ports their PR #46 guard:
-it counts orphan sites plus registry-vs-recount volume drift (the pairing
-the COM reconcile would otherwise overwrite unseen); tests assert zero
-on healthy sims and nonzero on planted violations.
+draw `u <= SF` lives, else dying — Correction 8: the boundary kills on
+`u > SF`, so at SF = 0 a draw of exactly 0.0 survives with probability
+2^-53; G-Q is exact for its pinned seed, not a theorem) → dose reset
+to 0 for all live cells (A2; daughters born at 0) → division loop over
+viable cells at doubling volume with lognormal drift (daughters inherit
+`e·exp(σ·z)`, σ pinned 0.10; initial `e` is a seeded lognormal
+stand-in — spec Answer 2 pins the hashed geometry file, which this port
+does not carry) → COM reconcile → A3 resorb sweep (also at every
+`mcs_step` end, so a sub-2-site dyer never persists a whole window) →
+share measured pre-sweep on the dosed population (A4; the cap refuses
+above 50× only past 51 live cells per Correction 9) + doubling-time
+report (`T·ln2/ln(1+f)`). Dose arrives pre-accumulated per cycle; no
+MCS↔hours mapping enters the module. G is derived inside the cycle
+from the declared `t_rep_h`/`t_active_h`, so the G-C gate bites through
+the parameter rather than a literal.
+`odin test tests/response_test.odin` carries the gate ladder (G-N
+through G-H plus doubling, H4, A3 cull, lattice audit), each with its
+rejection input — eleven gates, sixteen tests. The G-D open arm runs
+the frozen cycle-1 per-site dose map with full death/refill mechanics
+(blind selection); the closed arm reassigns dose ∝ e every cycle, and
+the contrast plus open-is-closed control keep the ordering honest.
+`audit_lattice` ports their PR #46 guard: it counts orphan sites plus
+registry-vs-recount volume drift (the pairing the COM reconcile would
+otherwise overwrite unseen); tests assert zero on healthy sims and
+nonzero on planted violations. All fifteen vectors-file entries are
+covered: fourteen scalars bit-match Julia 1.12 (committed test), plus
+the branch-continuity bound.
 
 ## Performance (exactness-preserving only)
 

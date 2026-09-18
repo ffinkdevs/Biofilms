@@ -27,7 +27,11 @@ foreign libc {
 RESP_ALPHA   :: 0.24
 RESP_BETA    :: 0.06
 RESP_T_REP_H :: 1.5
-RESP_MU      :: 0.4620981203732968 // ln2/1.5
+// mu is COMPUTED as ln2/T_rep, exactly like the reference
+// (MU = np.log(2.0)/T_REP) and Julia (log(2)/1.5) — not the decimal
+// literal 0.4620981203732968, which differs by 1 ulp and moves G24 by
+// 1 ulp with it. Comptime division rounds identically to runtime.
+RESP_MU :: math.LN2 / RESP_T_REP_H
 RESP_T_ACTIVE_H :: 96.0
 RESP_SIGMA_DIV  :: 0.10
 RESP_T_DOUBLING_H :: 58.4 // reference doubling (report band, not dynamics)
@@ -40,6 +44,11 @@ RESP_SHARE_CAP  :: 50.0   // A4: refuse above 50x uniform share
 // 0.0 at small x (gate G5c's defect), and the Taylor branch is the only
 // accepted fix. jexp-based exp would also work here (x >= 1e-3 on the
 // full branch), but expm1 states the intent.
+//
+// Bit-parity note: mu is computed as ln2/T_rep like the reference, not
+// taken from the file's decimal literal (which differs 1 ulp and moves
+// G24 with it — found by bit-matching). expm1 is C99 correctly rounded;
+// gates assert 1e-6, six orders above any libm dust.
 g_of_t :: proc(T_h, mu: f64) -> f64 {
 	x := mu * T_h
 	if x < 1e-3 {
@@ -80,6 +89,19 @@ assign_dose_uniform :: proc(s: ^Sim, D: f64) {
 	}
 }
 
+// Accrue a uniform delivery on top of the current accumulated dose.
+// Models transport delivering D Gy into whatever is banked: with the A2
+// reset present every cycle reads exactly D; with it deleted the bank
+// grows and the G-B gate fails. Assign overwrites; accrue adds — the
+// distinction the whole gate turns on.
+accrue_dose_uniform :: proc(s: ^Sim, D: f64) {
+	for id in 1..<s.next_id {
+		if cell_alive(s, id) {
+			cell_set_dose(s, id, cell_dose(s, id) + D)
+		}
+	}
+}
+
 // Assign dose proportional to expression^power (power = 1 is the
 // specified uptake rule; power = -1 is the G-D rejection control that
 // must reverse selection).
@@ -90,6 +112,45 @@ assign_dose_scaled_e :: proc(s: ^Sim, k, power: f64) {
 		}
 		e := cell_expr(s, id)
 		cell_set_dose(s, id, k * math.pow(e, power))
+	}
+}
+
+// Assign each live cell the mean of a per-site dose map over its own
+// sites. The G-D open arm builds the map once (cycle-1 doses) and
+// freezes it: refilled sites keep their old dose and kill whoever moves
+// in, so selection still acts, blind to who moved. Map layout is the
+// arena's (lidx order); exterior entries are read as-is.
+assign_dose_from_map :: proc(s: ^Sim, dose_map: []f64) {
+	for id in 1..<s.next_id {
+		if !cell_alive(s, id) {
+			continue
+		}
+		sum := 0.0
+		cnt := 0
+		for i in 0..<s.arena.n3 {
+			if s.arena.lattice[i] == i32(id) {
+				sum += dose_map[i]
+				cnt += 1
+			}
+		}
+		if cnt > 0 {
+			cell_set_dose(s, id, sum / f64(cnt))
+		} else {
+			cell_set_dose(s, id, 0.0)
+		}
+	}
+}
+
+// Snapshot the current per-site dose assignment into a frozen map
+// (cell dose spread over that cell's sites; medium reads 0.0).
+freeze_dose_map :: proc(s: ^Sim, dose_map: []f64) {
+	for i in 0..<s.arena.n3 {
+		sig := s.arena.lattice[i]
+		if sig > 0 && cell_alive(s, int(sig)) {
+			dose_map[i] = cell_dose(s, int(sig))
+		} else {
+			dose_map[i] = 0.0
+		}
 	}
 }
 
@@ -158,13 +219,19 @@ expression_stats :: proc(s: ^Sim) -> Expression_Stats {
 	return st
 }
 
-// A4/G-H: refuse above 50x uniform share. Returns (share, ok).
-check_share_cap :: proc(s: ^Sim, cap := RESP_SHARE_CAP) -> (share: f64, ok: bool) {
+// A4/G-H: refuse above 50x uniform share — but only where refusal is
+// possible. Share is max/mean, so it can never exceed the live-cell
+// count: at 50 cells or fewer the cap refuses nothing (Correction 9).
+// Returns (share, gated, ok): gated is false at n <= 50 (report only),
+// ok is false only when gated and over cap.
+check_share_cap :: proc(s: ^Sim, cap := RESP_SHARE_CAP) -> (share: f64, gated, ok: bool) {
 	st := expression_stats(s)
 	if st.n == 0 {
-		return 0, true
+		return 0, false, true
 	}
-	return st.max_share, st.max_share <= cap
+	gated = st.n > 50
+	ok = !gated || st.max_share <= cap
+	return st.max_share, gated, ok
 }
 
 // Same share under an alternate uptake power (the G-H control is
@@ -188,15 +255,18 @@ max_share_for_power :: proc(s: ^Sim, power: f64) -> f64 {
 	return mx / (sum / f64(n))
 }
 
-// Realized population doubling time over a cycle window:
-// T_d = cycle_hours * n_start / n_divisions (+Inf when nothing divided).
-// The band is declared by the caller (default ±2x around 58.4 h); the
-// check, not the number, is the gate.
+// Realized population doubling time over a cycle window from the
+// growth factor g = 1 + f (f = divisions per starting cell):
+// T_d = cycle_hours * ln2 / ln(g). (An earlier revision used
+// cycle_hours * n_start / n_divisions, which errs by 17% at f = 0.5;
+// the two agree only at f = 1.) +Inf when nothing divided. The band is
+// declared by the caller; the check, not the number, is the gate.
 doubling_time_h :: proc(n_divisions, n_start: int, cycle_hours: f64) -> f64 {
 	if n_divisions <= 0 || n_start <= 0 {
 		return math.INF_F64
 	}
-	return cycle_hours * f64(n_start) / f64(n_divisions)
+	f := f64(n_divisions) / f64(n_start)
+	return cycle_hours * math.LN2 / math.ln(1.0 + f)
 }
 
 check_doubling_band :: proc(t_d, lo, hi: f64) -> bool {
@@ -207,6 +277,7 @@ Cycle_Report :: struct {
 	deaths:     int,
 	divisions:  int,
 	n_start:    int,
+	g_used:     f64, // G derived from rp (t_rep_h/t_active_h live here)
 	mean_sf:    f64,
 	min_ln_e:   f64,
 	max_e:      f64,
@@ -217,25 +288,38 @@ Cycle_Report :: struct {
 }
 
 // One exposure cycle (spec §4 + A1/A2/A3):
-//  1. Death sweep, ascending cell id, EVERY live cell drawn exactly once
-//     (A1 — unconditional, so arrested cells still die; G-Q). Survivors
-//     keep state viable; failures go dying. Uniforms from s.rng (H2).
-//  2. A2: every live dose resets to 0 (lived or died); SF sees only this
+//  0. G derived from rp.t_rep_h/t_active_h (mu = ln2/t_rep), so the
+//     declared T_rep drives the computation (G-C bites through it).
+//  1. Share measured on the dose-assigned population BEFORE the sweep
+//     (A4: the activity's share belongs to its receivers, not the
+//     next cycle's survivors).
+//  2. Death sweep, ascending cell id, EVERY live cell drawn exactly once
+//     (A1 — unconditional, so arrested cells still die; G-Q). The draw
+//     lives on RNG <= SF and dies on RNG > SF (spec §4; Correction 8:
+//     at SF = 0 a draw of exactly 0.0 survives with probability 2^-53,
+//     so G-Q is exact for its pinned seed, not a theorem). Uniforms
+//     from s.rng (H2).
+//  3. A2: every live dose resets to 0 (lived or died); SF sees only this
 //     cycle's dose (G-B).
-//  3. Division loop over viable cells at volume >= 2*V_target (requires
-//     V_target >= 1): divide with lognormal drift; daughters born at
-//     dose 0 (A2).
-//  4. Centers of mass reconciled; A3 resorb sweep for <2-site dyers.
-//  5. Distribution + share (A4) + doubling report.
-// G is constant per cycle (precomputed by the caller from T_active).
-response_cycle :: proc(s: ^Sim, rp: Response_Params, G, cycle_hours: f64) -> Cycle_Report {
+//  4. Division loop over viable cells at volume >= 2*V_target: divide
+//     with lognormal drift; daughters born at dose 0 (A2).
+//  5. Centers of mass reconciled; A3 resorb sweep for <2-site dyers.
+//  6. Distribution + share refusal + doubling report.
+response_cycle :: proc(s: ^Sim, rp: Response_Params, cycle_hours: f64) -> Cycle_Report {
 	rep: Cycle_Report
+	mu := math.LN2 / rp.t_rep_h
+	G := g_of_t(rp.t_active_h, mu)
+	rep.g_used = G
 	for id in 1..<s.next_id {
 		if cell_alive(s, id) {
 			rep.n_start += 1
 		}
 	}
-	// Phase 1: unconditional survival sweep (A1).
+	// Phase 1 (A4): share on the dosed population, before the sweep.
+	st0 := expression_stats(s)
+	rep.max_share = st0.max_share
+	rep.share_ok = st0.n <= 50 || st0.max_share <= RESP_SHARE_CAP
+	// Phase 2: unconditional survival sweep (A1).
 	sf_sum := 0.0
 	n_drawn := 0
 	for id in 1..<s.next_id {
@@ -254,13 +338,13 @@ response_cycle :: proc(s: ^Sim, rp: Response_Params, G, cycle_hours: f64) -> Cyc
 	if n_drawn > 0 {
 		rep.mean_sf = sf_sum / f64(n_drawn)
 	}
-	// Phase 2 (A2): dose consumed by the check.
+	// Phase 3 (A2): dose consumed by the check.
 	for id in 1..<s.next_id {
 		if cell_alive(s, id) {
 			cell_set_dose(s, id, 0.0)
 		}
 	}
-	// Phase 3: division loop over viable cells at doubling volume.
+	// Phase 4: division loop over viable cells at doubling volume.
 	if s.params.v_target >= 1 {
 		for id in 1..<s.next_id {
 			if !cell_alive(s, id) {
@@ -272,7 +356,6 @@ response_cycle :: proc(s: ^Sim, rp: Response_Params, G, cycle_hours: f64) -> Cyc
 			if cell_volume(s, id) < 2 * s.params.v_target {
 				continue
 			}
-			cell_set_state(s, id, CELL_MITOTIC)
 			e := cell_expr(s, id)
 			z1 := rng_normal(&s.rng)
 			z2 := rng_normal(&s.rng)
@@ -291,8 +374,6 @@ response_cycle :: proc(s: ^Sim, rp: Response_Params, G, cycle_hours: f64) -> Cyc
 	rep.min_ln_e = math.ln(st.min_e) if st.n > 0 else 0
 	rep.max_e = st.max_e
 	rep.mean_ln_e = st.mean_ln_e
-	rep.max_share = st.max_share
-	rep.share_ok = st.max_share <= RESP_SHARE_CAP
 	rep.doubling_h = doubling_time_h(rep.divisions, rep.n_start, cycle_hours)
 	return rep
 }

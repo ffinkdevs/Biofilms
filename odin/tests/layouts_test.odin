@@ -54,7 +54,7 @@ test_layout_equivalence :: proc(t: ^testing.T) {
 		sims := [3]^cpm.Sim{&a, &b, &c}
 		for sim in sims {
 			cpm.assign_dose_uniform(sim, 5.0)
-			_ = cpm.response_cycle(sim, rp, G, rp.cycle_hours)
+			_ = cpm.response_cycle(sim, rp, rp.cycle_hours)
 		}
 		for id in 1..<a.next_id {
 			testing.expectf(t, cpm.cell_alive(&a, id) == cpm.cell_alive(&b, id) &&
