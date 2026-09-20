@@ -55,7 +55,7 @@ G96 :: proc() -> f64 {
 // found because this port bit-matches Julia and reported it
 // (spec Correction 4). Current file stores %.6e and asserts at six;
 // the test below uses relative 1e-6 throughout, plus bit-exactness
-// against Julia 1.12 for all fifteen values (verified in scratch).
+// against Julia 1.12 for every vectors-file scalar (verified in scratch).
 
 @(test)
 test_resp_G_vectors :: proc(t: ^testing.T) {
@@ -80,14 +80,16 @@ test_resp_G_vectors :: proc(t: ^testing.T) {
 	testing.expectf(t, diff <= 5e-11, "branch gap %v exceeds 5e-11", diff)
 }
 
-// ---- All fifteen vectors bit-exact vs Julia 1.12 (plus continuity) ----
+// ---- All fourteen vectors bit-exact vs Julia 1.12 (plus continuity) ----
 
 @(test)
 test_resp_vectors_bitexact :: proc(t: ^testing.T) {
 	// Patterns emitted by Julia 1.12.6 (reinterpret(UInt64, v)).
-	// Fourteen scalar values + the branch-continuity bound above = the
-	// file's fifteen entries. glibc-pinned like julia_exp_test: a
-	// platform libm change shows here first, loudly.
+	// Thirteen check() calls cover all fourteen vectors-file scalars:
+	// SF(10 Gy) at G(96 h) is listed twice (SF table + protraction),
+	// so one call covers two entries. Plus the branch-continuity
+	// bound above = the file's fifteen entries. glibc-pinned like
+	// julia_exp_test: a platform libm change shows here first, loudly.
 	mu := cpm.RESP_MU
 	check :: proc(t: ^testing.T, name: string, got, want: u64) {
 		testing.expectf(t, got == want, "%s bits %d, want %d", name, got, want)
@@ -358,6 +360,37 @@ test_resp_G_quorum :: proc(t: ^testing.T) {
 	}
 	testing.expectf(t, eligible == 0, "attempt-gated control must draw 0, drew %d", eligible)
 }
+// ---- G-M: a cell that failed its survival draw never divides ----
+
+@(test)
+test_resp_G_mitotic_parent :: proc(t: ^testing.T) {
+	// Amendment A5: the state check in the division loop is the only
+	// line stopping a dying cell from dividing into two viable
+	// daughters (which would erase the death silently). v_target=2
+	// puts every founder above division volume, so the check runs on
+	// every cell; at 1000 Gy every draw fails, so any division at all
+	// is the defect.
+	rp := resp_params()
+	s := make_rsim(20260720, 2)
+	defer cpm.sim_destroy(&s)
+	// Precondition first: at least one cell above division volume, or
+	// the test reads the same with the guard deleted.
+	big := 0
+	for id in 1..<s.next_id {
+		if cpm.cell_alive(&s, id) && cpm.cell_volume(&s, id) >= 2 * s.params.v_target {
+			big += 1
+		}
+	}
+	testing.expectf(t, big > 0, "no cell above division volume; control vacuous")
+	n0 := s.next_id
+	alive0 := cpm.count_alive(&s)
+	cpm.assign_dose_uniform(&s, 1000.0)
+	rep := cpm.response_cycle(&s, rp, rp.cycle_hours)
+	testing.expectf(t, rep.deaths == alive0, "deaths %d of %d exposed", rep.deaths, alive0)
+	testing.expectf(t, rep.divisions == 0, "dying cells divided %d times", rep.divisions)
+	testing.expectf(t, s.next_id == n0, "next_id moved %d -> %d: unauthorised divisions", n0, s.next_id)
+}
+
 
 // ---- G-B: per-cycle SF identical across four equal-dose cycles ----
 

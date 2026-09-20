@@ -140,15 +140,17 @@ mode:
 
 - CSV columns match `validate_serial.jl` format (`CSV,seed,species,vol,ncells,mel,survived`).
 - N=40, 6 cells/species, 100 MCS, seed 42, coupled, `--rng julia`:
-  `tests/fixtures/serial_seed42.csv` reproduces 7/7 plus membrane m
-  (0.7786 vs 0.77856) — stream and model settled in one run.
+  `test_seed42_golden_csv` reads `tests/fixtures/serial_seed42.csv`
+  and reproduces 7/7 plus membrane m (0.7786 vs 0.77856) — stream and
+  model settled in one run.
 - Lattice trajectory is provably unaffected by coupling (one-way;
   `test_coupling_moves_no_sites`), so CPM-only runs share the same
   lattice path.
 - `odin test tests/`: layout equivalence, SIMD-vs-scalar, determinism,
   voxel collection, coupling lattice-identity, membrane closed forms,
   coupled determinism, Julia-RNG bit-parity (2 seeds), Julia-exp
-  bit-parity (20 points), response ladder (16 tests), lattice audit — 26/26 pass.
+  bit-parity (20 points), response ladder (17 tests), lattice audit,
+  seed-42 golden CSV — 28/28 pass.
 
 ## Ensemble: melanin ordering across seeds
 
@@ -218,9 +220,10 @@ report (`T·ln2/ln(1+f)`). Dose arrives pre-accumulated per cycle; no
 MCS↔hours mapping enters the module. G is derived inside the cycle
 from the declared `t_rep_h`/`t_active_h`, so the G-C gate bites through
 the parameter rather than a literal.
-`odin test tests/response_test.odin` carries the gate ladder (G-N
-through G-H plus doubling, H4, A3 cull, lattice audit), each with its
-rejection input — eleven gates, sixteen tests. The G-D open arm runs
+`odin test tests/response_test.odin` carries the gate ladder (ten
+gates G-N/G-O/G-P/G-C/G-S/G-D/G-Q/G-M/G-B/G-H plus doubling, H4, A3
+cull, lattice audit), each with its rejection input — ten gates,
+seventeen tests. The G-D open arm runs
 the frozen cycle-1 per-site dose map with full death/refill mechanics
 (blind selection); the closed arm reassigns dose ∝ e every cycle, and
 the contrast plus open-is-closed control keep the ordering honest.
@@ -228,8 +231,9 @@ the contrast plus open-is-closed control keep the ordering honest.
 registry-vs-recount volume drift (the pairing the COM reconcile would
 otherwise overwrite unseen); tests assert zero on healthy sims and
 nonzero on planted violations. All fifteen vectors-file entries are
-covered: fourteen scalars bit-match Julia 1.12 (committed test), plus
-the branch-continuity bound.
+covered: thirteen bit-exact calls match all fourteen Julia 1.12
+scalars (SF(10 Gy)@G(96h) is listed twice — SF table + protraction),
+plus the branch-continuity bound.
 
 ## Performance (exactness-preserving only)
 
